@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        target: [aarch64-apple-darwin, x86_64-unknown-linux-gnu]
+        target: [x86_64-unknown-linux-gnu]
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
 
