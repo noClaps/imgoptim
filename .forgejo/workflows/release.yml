@@ -6,27 +6,21 @@ permissions:
 jobs:
   build:
     runs-on: codeberg-medium-lazy
-    strategy:
-      fail-fast: true
-      matrix:
-        target: [x86_64-unknown-linux-gnu]
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
 
       - name: Setup Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          source $HOME/.cargo/env
-          rustup target add ${{ matrix.target }}
 
       - name: Build and package
         run: |
           source $HOME/.cargo/env
-          cargo build --release --target ${{ matrix.target }}
-          cp target/${{ matrix.target }}/release/imgoptim .
-          tar -acf imgoptim-${{ matrix.target }}.tar.xz ./imgoptim
+          cargo build --release
+          cp target/release/imgoptim .
+          tar -acf imgoptim.tar.xz ./imgoptim
           mkdir -p dist/release/
-          mv imgoptim-${{ matrix.target }}.tar.xz dist/release/
+          mv imgoptim.tar.xz dist/release/
 
       - uses: https://code.forgejo.org/actions/forgejo-release@v2
         with:
