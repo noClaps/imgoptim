@@ -52,7 +52,7 @@ dependencies = [
 [[package]]
 name = "argparse"
 version = "0.1.0"
-source = "git+https://codeberg.org/noClaps/argparse#0795183c958ba31b35c726d1c14f7836c01fe1e5"
+source = "git+https://codeberg.org/noClaps/argparse#7e29a2d0aef440508d73e6428278cdeab9034797"
 
 [[package]]
 name = "arrayvec"

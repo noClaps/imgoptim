@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-argparse = { git = "https://codeberg.org/noClaps/argparse", version = "0.1.0" }
+argparse = { git = "https://codeberg.org/noClaps/argparse" }
 fast_image_resize = { version = "6.0.0", features = ["image"] }
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "avif", "rayon"] }
