@@ -1,8 +1,5 @@
 on: [release, workflow_dispatch]
 
-permissions:
-  contents: write
-
 jobs:
   build:
     runs-on: codeberg-medium-lazy
@@ -25,3 +22,4 @@ jobs:
       - uses: https://code.forgejo.org/actions/forgejo-release@v2
         with:
           direction: upload
+          token: ${{ secrets.RELEASE_TOKEN }}
