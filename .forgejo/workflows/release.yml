@@ -21,6 +21,7 @@ jobs:
 
       - name: Build and package
         run: |
+          source $HOME/.cargo/env
           cargo build --release --target ${{ matrix.target }}
           cp target/${{ matrix.target }}/release/imgoptim .
           tar -acf imgoptim-${{ matrix.target }}.tar.xz ./imgoptim
