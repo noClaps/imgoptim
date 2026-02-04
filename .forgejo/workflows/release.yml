@@ -15,7 +15,7 @@ jobs:
 
       - name: Setup Rust
         run: |
-          sudo apt install rustup
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           rustup default stable
           rustup target add ${{ matrix.target }}
 
