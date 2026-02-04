@@ -1,35 +1,33 @@
 use std::{fs::File, path::PathBuf};
 
-use argh::FromArgs;
+use argparse::ArgParse;
 use fast_image_resize::{IntoImageView, Resizer, images::Image};
 use image::{GenericImageView, ImageEncoder, ImageReader, codecs::avif::AvifEncoder};
 
-/// A command line utility to optimise images
-#[derive(FromArgs)]
-#[argh(help_triggers("-h", "--help"))]
-struct Args {
-    /// set the width of the output image in pixels
-    #[argh(option, short = 'W')]
-    width: Option<u32>,
-
-    /// path to the image you'd like to optimise
-    #[argh(positional)]
-    path: PathBuf,
-    /// output path for the optimised image
-    #[argh(positional)]
-    out_path: PathBuf,
-}
-
 fn main() {
-    let args: Args = argh::from_env();
+    let mut args = ArgParse::new()
+        .about("A command line utility to optimise images")
+        .flag(
+            "width",
+            "width",
+            Some("W"),
+            "Set the width of the output image in pixels.",
+            false,
+        )
+        .positional("path", "Path to the image you'd like to optimise.")
+        .positional("out-path", "Output path for the optimised image.");
+    args.parse();
+    let out_width: Option<u32> = args.get_flag("width");
+    let path: PathBuf = args.get_positional("path").unwrap();
+    let out_path: PathBuf = args.get_positional("out-path").unwrap();
 
-    let src_image = ImageReader::open(&args.path)
-        .expect(&format!("Failed to open {:?}", &args.path))
+    let src_image = ImageReader::open(&path)
+        .expect(&format!("Failed to open {:?}", &path))
         .decode()
-        .expect(&format!("Failed to decode {:?}", &args.path));
+        .expect(&format!("Failed to decode {:?}", &path));
     let (width, height) = src_image.dimensions();
 
-    let (resized_width, resized_height) = match args.width {
+    let (resized_width, resized_height) = match out_width {
         Some(w) => (w, height * w / width),
         None => (width, height),
     };
@@ -39,16 +37,14 @@ fn main() {
         resized_height,
         src_image
             .pixel_type()
-            .expect(&format!("Failed to get pixel type from {:?}", &args.path)),
+            .expect(&format!("Failed to get pixel type from {:?}", &path)),
     );
     Resizer::new()
         .resize(&src_image, &mut dest_image, None)
-        .expect(&format!("Error while resizing {:?}", &args.path));
+        .expect(&format!("Error while resizing {:?}", &path));
 
-    let outfile = File::create(&args.out_path).expect(&format!(
-        "Error creating output file at {:?}",
-        &args.out_path
-    ));
+    let outfile =
+        File::create(&out_path).expect(&format!("Error creating output file at {:?}", &out_path));
     AvifEncoder::new_with_speed_quality(outfile, 10, 100)
         .write_image(
             dest_image.buffer(),
@@ -56,7 +52,7 @@ fn main() {
             dest_image.height(),
             src_image.color().into(),
         )
-        .expect(&format!("Error while encoding {:?}", &args.out_path));
+        .expect(&format!("Error while encoding {:?}", &out_path));
 
     println!("{} {}", resized_width, resized_height);
 }

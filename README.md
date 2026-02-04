@@ -29,17 +29,17 @@ cargo run -- --help
 ## Usage
 
 ```
-Usage: imgoptim <path> <out_path> [-W <width>]
+USAGE: imgoptim <path> <out-path> [--width <width>]
 
 A command line utility to optimise images
 
-Positional Arguments:
-  path              path to the image you'd like to optimise
-  out_path          output path for the optimised image
+POSITIONALS:
+  <path>                 Path to the image you'd like to optimise.
+  <out-path>             Output path for the optimised image.
 
-Options:
-  -W, --width       set the width of the output image in pixels
-  -h, --help        display usage information
+FLAGS:
+  -W, --width <width>    Set the width of the output image in pixels.
+  -h, --help             Display this help and exit.
 ```
 
 To use `imgoptim`, you need to pass in a path to a JPEG or PNG image, and an output path:
