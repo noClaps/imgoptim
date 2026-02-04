@@ -1,0 +1,32 @@
+on: [release, workflow_dispatch]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: codeberg-medium-lazy
+    strategy:
+      fail-fast: true
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-unknown-linux-gnu]
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v6
+
+      - name: Setup Rust
+        run: |
+          sudo apt install rustup
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - name: Build and package
+        run: |
+          cargo build --release --target ${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/imgoptim .
+          tar -acf imgoptim-${{ matrix.target }}.tar.xz ./imgoptim
+          mkdir -p dist/release/
+          mv imgoptim-${{ matrix.target }}.tar.xz dist/release/
+
+      - uses: https://code.forgejo.org/actions/forgejo-release@v2
+        with:
+          direction: upload

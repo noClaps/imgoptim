@@ -1,0 +1,9 @@
+[package]
+name = "imgoptim"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+argh = "0.1.13"
+fast_image_resize = { version = "6.0.0", features = ["image"] }
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "avif", "rayon"] }
