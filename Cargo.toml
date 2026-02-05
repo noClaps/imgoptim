@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 argparse = { git = "https://codeberg.org/noClaps/argparse" }
-fast_image_resize = { version = "6.0.0" }
+fast_image_resize = { version = "6.0.0", features = ["rayon"] }
 image = { version = "0.25.9", default-features = false, features = ["avif", "rayon"] }
 zune-core = "0.5.1"
 zune-jpeg = "0.5.12"
