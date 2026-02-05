@@ -67,10 +67,9 @@ fn main() {
     let mut dest_image = Image::new(resized_width, resized_height, PixelType::U8x3);
     Resizer::new()
         .resize(&src_image, &mut dest_image, None)
-        .expect(&format!("Error while resizing {:?}", &path));
+        .expect("Error while resizing");
 
-    let outfile =
-        File::create(&out_path).expect(&format!("Error creating output file at {:?}", &out_path));
+    let outfile = File::create(&out_path).expect("Error creating output file");
     AvifEncoder::new_with_speed_quality(outfile, 10, 100)
         .write_image(
             dest_image.buffer(),
@@ -78,7 +77,7 @@ fn main() {
             dest_image.height(),
             ExtendedColorType::Rgb8,
         )
-        .expect(&format!("Error while encoding {:?}", &out_path));
+        .expect("Error while encoding AVIF");
 
     println!("{} {}", resized_width, resized_height);
 }
