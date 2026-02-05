@@ -1,8 +1,15 @@
-use std::{fs::File, path::PathBuf};
+use std::{
+    fs::{self, File},
+    path::PathBuf,
+    process::exit,
+};
 
 use argparse::ArgParse;
-use fast_image_resize::{IntoImageView, Resizer, images::Image};
-use image::{GenericImageView, ImageEncoder, ImageReader, codecs::avif::AvifEncoder};
+use fast_image_resize::{PixelType, Resizer, images::Image};
+use image::{ExtendedColorType, ImageEncoder, codecs::avif::AvifEncoder};
+use zune_core::{bytestream::ZCursor, options::DecoderOptions};
+use zune_jpeg::JpegDecoder;
+use zune_png::PngDecoder;
 
 fn main() {
     let mut args = ArgParse::new()
@@ -21,24 +28,43 @@ fn main() {
     let path: PathBuf = args.get_positional("path").unwrap();
     let out_path: PathBuf = args.get_positional("out-path").unwrap();
 
-    let src_image = ImageReader::open(&path)
-        .expect(&format!("Failed to open {:?}", &path))
-        .decode()
-        .expect(&format!("Failed to decode {:?}", &path));
-    let (width, height) = src_image.dimensions();
+    let file = fs::read(&path).expect("Error reading file");
+
+    const JPEG_MAGIC_BYTES: [u8; 3] = [0xff, 0xd8, 0xff];
+    const PNG_MAGIC_BYTES: [u8; 8] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+    let decoder_options = DecoderOptions::new_fast().png_set_strip_to_8bit(true);
+    let (src_image, width, height) = match () {
+        _ if file.starts_with(&JPEG_MAGIC_BYTES) => {
+            let mut decoder = JpegDecoder::new_with_options(ZCursor::new(file), decoder_options);
+            let bytes = decoder.decode().expect("Error decoding JPEG");
+            let (width, height) = decoder.dimensions().expect("Error reading dimensions");
+            (bytes, width as u32, height as u32)
+        }
+        _ if file.starts_with(&PNG_MAGIC_BYTES) => {
+            let mut decoder = PngDecoder::new_with_options(ZCursor::new(file), decoder_options);
+            let bytes = decoder
+                .decode()
+                .expect("Error decoding PNG")
+                .u8()
+                .expect("Error getting u8 slice");
+            let (width, height) = decoder.dimensions().expect("Error reading dimensions");
+            (bytes, width as u32, height as u32)
+        }
+        _ => {
+            eprintln!("Only JPEG and PNG images are allowed as input");
+            exit(1)
+        }
+    };
 
     let (resized_width, resized_height) = match out_width {
         Some(w) => (w, height * w / width),
         None => (width, height),
     };
 
-    let mut dest_image = Image::new(
-        resized_width,
-        resized_height,
-        src_image
-            .pixel_type()
-            .expect(&format!("Failed to get pixel type from {:?}", &path)),
-    );
+    let src_image = Image::from_vec_u8(width, height, src_image, PixelType::U8x3)
+        .expect("Error converting image");
+    let mut dest_image = Image::new(resized_width, resized_height, PixelType::U8x3);
     Resizer::new()
         .resize(&src_image, &mut dest_image, None)
         .expect(&format!("Error while resizing {:?}", &path));
@@ -50,7 +76,7 @@ fn main() {
             dest_image.buffer(),
             dest_image.width(),
             dest_image.height(),
-            src_image.color().into(),
+            ExtendedColorType::Rgb8,
         )
         .expect(&format!("Error while encoding {:?}", &out_path));
 
