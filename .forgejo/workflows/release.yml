@@ -6,7 +6,7 @@ on:
 
 jobs:
   build:
-    runs-on: codeberg-small-lazy
+    runs-on: codeberg-medium-lazy
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v6
 
