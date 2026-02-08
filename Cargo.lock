@@ -424,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "imgoptim"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "clap",
  "fast_image_resize",

@@ -14,7 +14,7 @@ use zune_png::PngDecoder;
 #[derive(Parser)]
 /// A command line utility to optimise images
 struct Args {
-    #[arg(short = 'W')]
+    #[arg(short = 'W', long)]
     /// Set the width of the output image in pixels.
     width: Option<u32>,
 
