@@ -38,8 +38,8 @@ Arguments:
   <OUT_PATH>  Output path for the optimised image
 
 Options:
-  -W <WIDTH>  Set the width of the output image in pixels
-  -h, --help  Print help
+  -W, --width <WIDTH>  Set the width of the output image in pixels
+  -h, --help           Print help
 ```
 
 To use `imgoptim`, you need to pass in a path to a JPEG or PNG image, and an output path:
