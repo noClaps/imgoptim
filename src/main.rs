@@ -4,31 +4,30 @@ use std::{
     process::exit,
 };
 
-use argparse::ArgParse;
+use clap::Parser;
 use fast_image_resize::{PixelType, Resizer, images::Image};
 use image::{ExtendedColorType, ImageEncoder, codecs::avif::AvifEncoder};
 use zune_core::{bytestream::ZCursor, options::DecoderOptions};
 use zune_jpeg::JpegDecoder;
 use zune_png::PngDecoder;
 
-fn main() {
-    let mut args = ArgParse::new()
-        .about("A command line utility to optimise images")
-        .flag(
-            "width",
-            "width",
-            Some("W"),
-            "Set the width of the output image in pixels.",
-            false,
-        )
-        .positional("path", "Path to the image you'd like to optimise.")
-        .positional("out-path", "Output path for the optimised image.");
-    args.parse();
-    let out_width: Option<u32> = args.get_flag("width");
-    let path: PathBuf = args.get_positional("path").unwrap();
-    let out_path: PathBuf = args.get_positional("out-path").unwrap();
+#[derive(Parser)]
+/// A command line utility to optimise images
+struct Args {
+    #[arg(short = 'W')]
+    /// Set the width of the output image in pixels.
+    width: Option<u32>,
 
-    let file = fs::read(&path).expect("Error reading file");
+    /// Path to the image you'd like to optimise.
+    path: PathBuf,
+    /// Output path for the optimised image.
+    out_path: PathBuf,
+}
+
+fn main() {
+    let args = Args::parse();
+
+    let file = fs::read(&args.path).expect("Error reading file");
 
     const JPEG_MAGIC_BYTES: [u8; 3] = [0xff, 0xd8, 0xff];
     const PNG_MAGIC_BYTES: [u8; 8] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -57,7 +56,7 @@ fn main() {
         }
     };
 
-    let (resized_width, resized_height) = match out_width {
+    let (resized_width, resized_height) = match args.width {
         Some(w) => (w, height * w / width),
         None => (width, height),
     };
@@ -69,7 +68,7 @@ fn main() {
         .resize(&src_image, &mut dest_image, None)
         .expect("Error while resizing");
 
-    let outfile = File::create(&out_path).expect("Error creating output file");
+    let outfile = File::create(&args.out_path).expect("Error creating output file");
     AvifEncoder::new_with_speed_quality(outfile, 10, 100)
         .write_image(
             dest_image.buffer(),
