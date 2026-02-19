@@ -1,7 +1,7 @@
 use zlib_rs::{InflateConfig, ReturnCode, crc32::crc32, decompress_slice};
 
 pub const PNG_MAGIC_BYTES: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
-const BYTES_PER_PIXEL: u8 = 3;
+const BYTES_PER_PIXEL: usize = 3;
 
 /// Decodes a PNG file and returns `Some((pixels, width, height))` if successful.
 ///
@@ -105,32 +105,10 @@ fn read_header(bytes: &[u8]) -> Option<(u32, u32)> {
 
 fn reconstruct(bytes: &[u8], width: u32, height: u32) -> Vec<u8> {
     let mut recon = vec![];
-    let stride = (BYTES_PER_PIXEL as u32) * width;
-
-    let recon_a = |recon: &[u8], r: usize, c: usize| -> u8 {
-        if c >= BYTES_PER_PIXEL as usize {
-            recon[r * stride as usize + c - BYTES_PER_PIXEL as usize]
-        } else {
-            0
-        }
-    };
-    let recon_b = |recon: &[u8], r: usize, c: usize| -> u8 {
-        if r > 0 {
-            recon[(r - 1) * stride as usize + c]
-        } else {
-            0
-        }
-    };
-    let recon_c = |recon: &[u8], r: usize, c: usize| -> u8 {
-        if r > 0 && c >= BYTES_PER_PIXEL as usize {
-            recon[(r - 1) * stride as usize + c - BYTES_PER_PIXEL as usize]
-        } else {
-            0
-        }
-    };
+    let stride = BYTES_PER_PIXEL * width as usize;
 
     let mut i = 0;
-    for r in 0..height {
+    for r in 0..height as usize {
         let filter_type = bytes[i];
         i += 1;
         for c in 0..stride {
@@ -139,17 +117,13 @@ fn reconstruct(bytes: &[u8], width: u32, height: u32) -> Vec<u8> {
             let recon_x = filt_x
                 + match filter_type {
                     0 => 0,
-                    1 => recon_a(&recon, r as usize, c as usize),
-                    2 => recon_b(&recon, r as usize, c as usize),
-                    3 => {
-                        (recon_a(&recon, r as usize, c as usize)
-                            + recon_b(&recon, r as usize, c as usize))
-                            / 2
-                    }
+                    1 => recon_a(&recon, stride, r, c),
+                    2 => recon_b(&recon, stride, r, c),
+                    3 => (recon_a(&recon, stride, r, c) + recon_b(&recon, stride, r, c)) / 2,
                     4 => paeth_prediction(
-                        recon_a(&recon, r as usize, c as usize),
-                        recon_b(&recon, r as usize, c as usize),
-                        recon_c(&recon, r as usize, c as usize),
+                        recon_a(&recon, stride, r, c),
+                        recon_b(&recon, stride, r, c),
+                        recon_c(&recon, stride, r, c),
                     ),
                     _ => unreachable!("unknown filter type: {filter_type}"),
                 };
@@ -158,6 +132,22 @@ fn reconstruct(bytes: &[u8], width: u32, height: u32) -> Vec<u8> {
     }
 
     recon
+}
+
+fn recon_a(recon: &[u8], stride: usize, r: usize, c: usize) -> u8 {
+    (c >= BYTES_PER_PIXEL)
+        .then(|| recon[r * stride + c - BYTES_PER_PIXEL])
+        .unwrap_or_default()
+}
+fn recon_b(recon: &[u8], stride: usize, r: usize, c: usize) -> u8 {
+    (r > 0)
+        .then(|| recon[(r - 1) * stride + c])
+        .unwrap_or_default()
+}
+fn recon_c(recon: &[u8], stride: usize, r: usize, c: usize) -> u8 {
+    (r > 0 && c >= BYTES_PER_PIXEL)
+        .then(|| recon[(r - 1) * stride + c - BYTES_PER_PIXEL])
+        .unwrap_or_default()
 }
 
 fn paeth_prediction(a: u8, b: u8, c: u8) -> u8 {
