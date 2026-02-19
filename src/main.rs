@@ -1,14 +1,8 @@
-use std::{
-    fs::{self, File},
-    path::PathBuf,
-    process::exit,
-};
+use std::{fs, path::PathBuf, process::exit};
 
 use clap::Parser;
 use fast_image_resize::{PixelType, Resizer, images::Image};
-use image::{ExtendedColorType, ImageEncoder, codecs::avif::AvifEncoder};
-use zune_core::{bytestream::ZCursor, options::DecoderOptions};
-use zune_jpeg::JpegDecoder;
+use ravif::{Encoder, Img, RGB8};
 
 mod png_decoder;
 
@@ -30,19 +24,12 @@ fn main() {
 
     let file = fs::read(&args.path).expect("Error reading file");
 
-    const JPEG_MAGIC_BYTES: [u8; 3] = [0xff, 0xd8, 0xff];
-
-    let decoder_options = DecoderOptions::new_fast();
-    let (src_image, width, height) = if file.starts_with(&JPEG_MAGIC_BYTES) {
-        let mut decoder = JpegDecoder::new_with_options(ZCursor::new(file), decoder_options);
-        let bytes = decoder.decode().expect("Error decoding JPEG");
-        let (width, height) = decoder.dimensions().expect("Error reading dimensions");
-        (bytes, width as u32, height as u32)
-    } else if file.starts_with(&png_decoder::PNG_MAGIC_BYTES) {
-        png_decoder::decode(&file).expect("Error decoding PNG")
-    } else {
-        eprintln!("Only JPEG and PNG images are allowed as input");
-        exit(1)
+    let (src_image, width, height) = match png_decoder::decode(&file) {
+        Some(decoded) => decoded,
+        None => {
+            eprintln!("Only JPEG and PNG images are allowed as input");
+            exit(1)
+        }
     };
 
     let (resized_width, resized_height) = match args.width {
@@ -57,19 +44,22 @@ fn main() {
         .resize(&src_image, &mut dest_image, None)
         .expect("Error while resizing");
 
-    let outfile = File::create(&args.out_path).expect("Error creating output file");
+    let pixels: Vec<_> = dest_image
+        .buffer()
+        .chunks_exact(3)
+        .map(|px| RGB8::new(px[0], px[1], px[2]))
+        .collect();
+    let buffer = Img::new(
+        pixels.as_slice(),
+        resized_width as usize,
+        resized_height as usize,
+    );
 
-    // cavif default settings
-    const AVIF_SPEED: u8 = 4;
-    const AVIF_QUALITY: u8 = 80;
-    AvifEncoder::new_with_speed_quality(outfile, AVIF_SPEED, AVIF_QUALITY)
-        .write_image(
-            dest_image.buffer(),
-            dest_image.width(),
-            dest_image.height(),
-            ExtendedColorType::Rgb8,
-        )
-        .expect("Error while encoding AVIF");
+    let encoded = Encoder::new()
+        .encode_rgb(buffer)
+        .expect("Error encoding to AVIF");
+
+    fs::write(args.out_path, encoded.avif_file).expect("Error writing output file");
 
     println!("{} {}", resized_width, resized_height);
 }

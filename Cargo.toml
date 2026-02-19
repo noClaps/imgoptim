@@ -1,12 +1,10 @@
 [package]
 name = "imgoptim"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
 clap = { version = "4.5.57", features = ["derive"] }
-fast_image_resize = { version = "6.0.0", features = ["rayon"] }
-image = { version = "0.25.9", default-features = false, features = ["avif", "rayon"] }
+fast_image_resize = "6.0.0"
+ravif = "0.13.0"
 zlib-rs = "0.6.2"
-zune-core = "0.5.1"
-zune-jpeg = "0.5.12"

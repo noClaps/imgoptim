@@ -42,14 +42,13 @@ Options:
   -h, --help           Print help
 ```
 
-To use `imgoptim`, you need to pass in a path to a JPEG or PNG image, and an output path:
+To use `imgoptim`, you need to pass in a path to a PNG image, and an output path:
 
 ```sh
-imgoptim path/to/image.jpeg path/to/image.avif
 imgoptim path/to/image.png path/to/image.avif
 ```
 
-This will optimise your input JPEG/PNG image to an AVIF image, retaining the same dimensions. If you'd like to customise the width of the image, you can do so with the `--width` or `-W` option:
+This will optimise your input PNG image to an AVIF image, retaining the same dimensions. If you'd like to customise the width of the image, you can do so with the `--width` or `-W` option:
 
 ```sh
 imgoptim path/to/image.png path/to/image.avif --width 800 # pixels
