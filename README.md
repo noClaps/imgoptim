@@ -71,3 +71,12 @@ You can view the help for the command using `--help` or `-h`:
 imgoptim --help
 imgoptim -h
 ```
+
+## Future goals
+
+I aim to implement custom decoders for all supported input formats, and match performance with existing decoder libraries. The rough benchmarks for implemented decoders on a test image (not included in repo) can be seen below:
+
+```
+custom PNG decoder time: 192 ms
+zune-png decoder time: 116 ms
+```

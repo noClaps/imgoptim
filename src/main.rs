@@ -9,7 +9,8 @@ use fast_image_resize::{PixelType, Resizer, images::Image};
 use image::{ExtendedColorType, ImageEncoder, codecs::avif::AvifEncoder};
 use zune_core::{bytestream::ZCursor, options::DecoderOptions};
 use zune_jpeg::JpegDecoder;
-use zune_png::PngDecoder;
+
+mod png_decoder;
 
 #[derive(Parser)]
 /// A command line utility to optimise images
@@ -30,30 +31,18 @@ fn main() {
     let file = fs::read(&args.path).expect("Error reading file");
 
     const JPEG_MAGIC_BYTES: [u8; 3] = [0xff, 0xd8, 0xff];
-    const PNG_MAGIC_BYTES: [u8; 8] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
-    let decoder_options = DecoderOptions::new_fast().png_set_strip_to_8bit(true);
-    let (src_image, width, height) = match () {
-        _ if file.starts_with(&JPEG_MAGIC_BYTES) => {
-            let mut decoder = JpegDecoder::new_with_options(ZCursor::new(file), decoder_options);
-            let bytes = decoder.decode().expect("Error decoding JPEG");
-            let (width, height) = decoder.dimensions().expect("Error reading dimensions");
-            (bytes, width as u32, height as u32)
-        }
-        _ if file.starts_with(&PNG_MAGIC_BYTES) => {
-            let mut decoder = PngDecoder::new_with_options(ZCursor::new(file), decoder_options);
-            let bytes = decoder
-                .decode()
-                .expect("Error decoding PNG")
-                .u8()
-                .expect("Error getting u8 slice");
-            let (width, height) = decoder.dimensions().expect("Error reading dimensions");
-            (bytes, width as u32, height as u32)
-        }
-        _ => {
-            eprintln!("Only JPEG and PNG images are allowed as input");
-            exit(1)
-        }
+    let decoder_options = DecoderOptions::new_fast();
+    let (src_image, width, height) = if file.starts_with(&JPEG_MAGIC_BYTES) {
+        let mut decoder = JpegDecoder::new_with_options(ZCursor::new(file), decoder_options);
+        let bytes = decoder.decode().expect("Error decoding JPEG");
+        let (width, height) = decoder.dimensions().expect("Error reading dimensions");
+        (bytes, width as u32, height as u32)
+    } else if file.starts_with(&png_decoder::PNG_MAGIC_BYTES) {
+        png_decoder::decode(&file).expect("Error decoding PNG")
+    } else {
+        eprintln!("Only JPEG and PNG images are allowed as input");
+        exit(1)
     };
 
     let (resized_width, resized_height) = match args.width {
@@ -69,7 +58,11 @@ fn main() {
         .expect("Error while resizing");
 
     let outfile = File::create(&args.out_path).expect("Error creating output file");
-    AvifEncoder::new_with_speed_quality(outfile, 10, 100)
+
+    // cavif default settings
+    const AVIF_SPEED: u8 = 4;
+    const AVIF_QUALITY: u8 = 80;
+    AvifEncoder::new_with_speed_quality(outfile, AVIF_SPEED, AVIF_QUALITY)
         .write_image(
             dest_image.buffer(),
             dest_image.width(),
