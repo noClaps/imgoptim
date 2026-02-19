@@ -1,10 +1,12 @@
-use std::{fs, path::PathBuf, process::exit};
+use std::{fs, path::PathBuf};
 
 use clap::Parser;
 use fast_image_resize::{PixelType, Resizer, images::Image};
 use ravif::{Encoder, Img, RGB8};
-
-mod png_decoder;
+use zune_png::{
+    PngDecoder,
+    zune_core::{bytestream::ZCursor, options::DecoderOptions},
+};
 
 #[derive(Parser)]
 /// A command line utility to optimise images
@@ -24,13 +26,19 @@ fn main() {
 
     let file = fs::read(&args.path).expect("Error reading file");
 
-    let (src_image, width, height) = match png_decoder::decode(&file) {
-        Some(decoded) => decoded,
-        None => {
-            eprintln!("Only JPEG and PNG images are allowed as input");
-            exit(1)
-        }
-    };
+    let mut decoder = PngDecoder::new_with_options(
+        ZCursor::new(file),
+        DecoderOptions::new_fast().png_set_strip_to_8bit(true),
+    );
+    let src_image = decoder
+        .decode()
+        .expect("Error decoding png")
+        .u8()
+        .expect("Error getting bytes from PNG");
+    let (width, height) = decoder
+        .dimensions()
+        .map(|(w, h)| (w as u32, h as u32))
+        .expect("Error getting dimensions from PNG");
 
     let (resized_width, resized_height) = match args.width {
         Some(w) => (w, height * w / width),
