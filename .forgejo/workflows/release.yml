@@ -16,7 +16,7 @@ jobs:
 
       - name: Install NASM
         run: |
-          sudo apt update
+          sudo apt update && sudo apt upgrade -y
           sudo apt install nasm -y
       - name: Build and package
         run: |
