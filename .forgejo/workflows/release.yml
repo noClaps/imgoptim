@@ -22,10 +22,8 @@ jobs:
         run: |
           source $HOME/.cargo/env
           cargo build --release
-          cp target/release/imgoptim .
-          tar -acf imgoptim.tar.xz ./imgoptim
           mkdir -p dist/release/
-          mv imgoptim.tar.xz dist/release/
+          cp target/release/imgoptim dist/release/imgoptim-x86_64-linux-gnu
 
       - uses: https://code.forgejo.org/actions/forgejo-release@v2
         with:
