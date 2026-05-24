@@ -1,0 +1,13 @@
+on: [push, workflow_dispatch]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-Dwarnings"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - run: cargo build --verbose
+      - run: cargo clippy --all-targets --all-features
