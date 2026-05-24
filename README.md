@@ -9,7 +9,7 @@ You'll need [Rust](https://rust-lang.org).
 Clone the repository:
 
 ```sh
-git clone https://codeberg.org/noClaps/imgoptim.git
+git clone https://github.com/noClaps/imgoptim.git
 cd imgoptim
 ```
 
