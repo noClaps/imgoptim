@@ -9,7 +9,6 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6.0.2
-      - run: brew install nasm
       - run: cargo build --release
       - uses: softprops/action-gh-release@v3.0.0
         with:

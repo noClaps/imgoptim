@@ -1,10 +1,12 @@
 use std::{fs, path::PathBuf};
 
 use clap::{Parser, Subcommand};
-use image::{GenericImageView, ImageFormat, imageops::FilterType};
+use heic::{DecoderConfig, PixelLayout};
+use image::{DynamicImage, ImageFormat, RgbImage, imageops::FilterType};
 
 #[derive(Clone, Subcommand)]
 enum Subcommands {
+    /// Optimise HEIC images to AVIF.
     Optimise {
         #[arg(short = 'W', long)]
         /// Set the width of the output image in pixels.
@@ -15,9 +17,9 @@ enum Subcommands {
         /// Output path for the optimised image.
         out_path: PathBuf,
     },
-
-    Dimensions {
-        /// Path to the image to get the dimensions of.
+    /// Get the height of an AVIF image.
+    Height {
+        /// Path to the image to get the height of.
         path: PathBuf,
     },
 }
@@ -37,26 +39,27 @@ fn main() {
             path,
             out_path,
         } => {
-            let src_image = image::open(&path).unwrap();
+            let data = fs::read(&path).unwrap();
+            let decoded = DecoderConfig::new()
+                .decode(&data, PixelLayout::Rgb8)
+                .unwrap();
 
-            let (src_width, src_height) = src_image.dimensions();
-            let (resized_width, resized_height) = match width {
-                Some(w) => (w, src_height * w / src_width),
-                None => (src_width, src_height),
-            };
+            let src_image = DynamicImage::ImageRgb8(
+                RgbImage::from_raw(decoded.width, decoded.height, decoded.data).unwrap(),
+            );
+
+            let resized_width = width.unwrap_or(decoded.width);
 
             src_image
-                .resize(resized_width, resized_height, FilterType::Lanczos3)
+                .resize(resized_width, u32::MAX, FilterType::Lanczos3)
                 .save_with_format(out_path, ImageFormat::Avif)
                 .unwrap();
         }
-        Subcommands::Dimensions { path } => {
+        Subcommands::Height { path } => {
             let bytes = fs::read(&path).unwrap();
             let ispe = bytes.windows(4).position(|b| b == b"ispe").unwrap();
-            let width = u32::from_be_bytes(*bytes[ispe + 8..].first_chunk::<4>().unwrap());
             let height = u32::from_be_bytes(*bytes[ispe + 12..].first_chunk::<4>().unwrap());
-
-            println!("{} {}", width, height);
+            println!("{height}");
         }
     }
 }
