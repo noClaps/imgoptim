@@ -1,8 +1,12 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs::{File, read},
+    path::PathBuf,
+};
 
 use clap::{Parser, Subcommand};
+use fast_image_resize::{PixelType, Resizer, images::Image};
 use heic::{DecoderConfig, PixelLayout};
-use image::{DynamicImage, ImageFormat, RgbImage, imageops::FilterType};
+use image::{ExtendedColorType, ImageEncoder, RgbImage, codecs::avif::AvifEncoder};
 
 #[derive(Clone, Subcommand)]
 enum Subcommands {
@@ -39,24 +43,37 @@ fn main() {
             path,
             out_path,
         } => {
-            let data = fs::read(&path).unwrap();
+            let data = read(&path).unwrap();
             let decoded = DecoderConfig::new()
                 .decode(&data, PixelLayout::Rgb8)
                 .unwrap();
 
-            let src_image = DynamicImage::ImageRgb8(
-                RgbImage::from_raw(decoded.width, decoded.height, decoded.data).unwrap(),
-            );
+            let src_image =
+                RgbImage::from_raw(decoded.width, decoded.height, decoded.data).unwrap();
 
-            let resized_width = width.unwrap_or(decoded.width);
+            let (src_width, src_height) = (decoded.width, decoded.height);
+            let (resized_width, resized_height) = match width {
+                Some(w) => (w, src_height * w / src_width),
+                None => (src_width, src_height),
+            };
 
-            src_image
-                .resize(resized_width, u32::MAX, FilterType::Lanczos3)
-                .save_with_format(out_path, ImageFormat::Avif)
+            let mut resized = Image::new(resized_width, resized_height, PixelType::U8x3);
+
+            let mut resizer = Resizer::new();
+            resizer.resize(&src_image, &mut resized, None).unwrap();
+
+            let file = File::create(out_path).unwrap();
+            AvifEncoder::new_with_speed_quality(file, 10, 80)
+                .write_image(
+                    resized.buffer(),
+                    resized_width,
+                    resized_height,
+                    ExtendedColorType::Rgb8,
+                )
                 .unwrap();
         }
         Subcommands::Height { path } => {
-            let bytes = fs::read(&path).unwrap();
+            let bytes = read(&path).unwrap();
             let ispe = bytes.windows(4).position(|b| b == b"ispe").unwrap();
             let height = u32::from_be_bytes(*bytes[ispe + 12..].first_chunk::<4>().unwrap());
             println!("{height}");
