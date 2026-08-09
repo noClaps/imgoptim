@@ -20,6 +20,7 @@ Usage: imgoptim <COMMAND>
 Commands:
   optimise  Optimise HEIC images to AVIF
   height    Get the height of an AVIF image
+  width     Get the width of an AVIF image
   help      Print this message or the help of the given subcommand(s)
 
 Options:
@@ -101,4 +102,31 @@ You can view the help for the command using `--help` or `-h`:
 ```sh
 imgoptim height --help
 imgoptim height -h
+```
+
+### Width
+
+```
+Get the width of an AVIF image
+
+Usage: imgoptim width <PATH>
+
+Arguments:
+  <PATH>  Path to the image to get the width of
+
+Options:
+  -h, --help  Print help
+```
+
+You can get the width of a given AVIF image using the `imgoptim width` command.
+
+```sh
+imgoptim width path/to/image.avif # 800
+```
+
+You can view the help for the command using `--help` or `-h`:
+
+```sh
+imgoptim width --help
+imgoptim width -h
 ```

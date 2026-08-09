@@ -31,7 +31,7 @@ enum Subcommands {
     },
     /// Get the width of an AVIF image.
     Width {
-        /// Path to the image to get the height of.
+        /// Path to the image to get the width of.
         path: PathBuf,
     },
 }
