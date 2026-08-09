@@ -10,4 +10,6 @@ jobs:
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v7
       - uses: https://github.com/dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - run: cargo clippy --release
