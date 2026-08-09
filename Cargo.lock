@@ -343,6 +343,7 @@ dependencies = [
  "enough",
  "magetypes",
  "memchr",
+ "rayon",
  "safe_unaligned_simd",
  "ultrahdr-core",
  "whereat",
