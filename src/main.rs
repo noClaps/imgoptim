@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
 };
 
-use clap::{Parser, Subcommand};
+use argp::FromArgs;
 use heic::{DecoderConfig, PixelLayout};
 use image::{
     EncodableLayout, ExtendedColorType, ImageEncoder, RgbImage,
@@ -11,46 +11,63 @@ use image::{
     imageops::{FilterType, resize},
 };
 
-#[derive(Clone, Subcommand)]
-enum Subcommands {
-    /// Optimise HEIC images to AVIF.
-    Optimise {
-        #[arg(short = 'W', long)]
-        /// Set the width of the output image in pixels.
-        width: Option<u32>,
+/// Optimise HEIC images to AVIF.
+#[derive(FromArgs, Clone)]
+#[argp(subcommand, name = "optimise")]
+struct SubcommandOptimise {
+    /// Set the width of the output image in pixels.
+    #[argp(option, short = 'W')]
+    width: Option<u32>,
 
-        /// Path to the image you'd like to optimise.
-        path: PathBuf,
-        /// Output path for the optimised image.
-        out_path: PathBuf,
-    },
-    /// Get the height of an AVIF image.
-    Height {
-        /// Path to the image to get the height of.
-        path: PathBuf,
-    },
-    /// Get the width of an AVIF image.
-    Width {
-        /// Path to the image to get the width of.
-        path: PathBuf,
-    },
+    /// Path to the image you'd like to optimise.
+    #[argp(positional)]
+    path: PathBuf,
+    /// Output path for the optimised image.
+    #[argp(positional)]
+    out_path: PathBuf,
 }
 
-#[derive(Parser)]
+/// Get the height of an AVIF image.
+#[derive(FromArgs, Clone)]
+#[argp(subcommand, name = "height")]
+struct SubcommandHeight {
+    /// Path to the image to get the height of.
+    #[argp(positional)]
+    path: PathBuf,
+}
+
+/// Get the width of an AVIF image.
+#[derive(FromArgs, Clone)]
+#[argp(subcommand, name = "width")]
+struct SubcommandWidth {
+    /// Path to the image to get the width of.
+    #[argp(positional)]
+    path: PathBuf,
+}
+
+#[derive(Clone, FromArgs)]
+#[argp(subcommand)]
+enum Subcommands {
+    Optimise(SubcommandOptimise),
+    Height(SubcommandHeight),
+    Width(SubcommandWidth),
+}
+
+#[derive(FromArgs)]
 /// A command line utility to optimise images
 struct Args {
-    #[command(subcommand)]
+    #[argp(subcommand)]
     subcommands: Subcommands,
 }
 
 fn main() {
-    let args = Args::parse();
+    let args: Args = argp::parse_args_or_exit(argp::DEFAULT);
     match args.subcommands {
-        Subcommands::Optimise {
+        Subcommands::Optimise(SubcommandOptimise {
             width,
             path,
             out_path,
-        } => {
+        }) => {
             let data = read(&path).unwrap();
             let decoded = DecoderConfig::new()
                 .decode(&data, PixelLayout::Rgb8)
@@ -82,13 +99,13 @@ fn main() {
                 )
                 .unwrap();
         }
-        Subcommands::Height { path } => {
+        Subcommands::Height(SubcommandHeight { path }) => {
             let bytes = read(&path).unwrap();
             let ispe = bytes.windows(4).position(|b| b == b"ispe").unwrap();
             let height = u32::from_be_bytes(*bytes[ispe + 12..].first_chunk::<4>().unwrap());
             println!("{height}");
         }
-        Subcommands::Width { path } => {
+        Subcommands::Width(SubcommandWidth { path }) => {
             let bytes = read(&path).unwrap();
             let ispe = bytes.windows(4).position(|b| b == b"ispe").unwrap();
             let width = u32::from_be_bytes(*bytes[ispe + 8..].first_chunk::<4>().unwrap());
