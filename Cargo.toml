@@ -1,10 +1,9 @@
 [package]
 name = "imgoptim"
-version = "0.4.1"
+version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
-fast_image_resize = { version = "6.0.0", features = ["rayon"] }
-heic = { version = "0.1.6", features = ["parallel"] }
-image = { version = "0.25.10", default-features = false, features = ["avif", "rayon"] }
+heic = "0.1.6"
+image = { version = "0.25.10", default-features = false, features = ["avif"] }

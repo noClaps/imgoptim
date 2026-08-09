@@ -4,9 +4,12 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-use fast_image_resize::{PixelType, Resizer, images::Image};
 use heic::{DecoderConfig, PixelLayout};
-use image::{ExtendedColorType, ImageEncoder, RgbImage, codecs::avif::AvifEncoder};
+use image::{
+    EncodableLayout, ExtendedColorType, ImageEncoder, RgbImage,
+    codecs::avif::AvifEncoder,
+    imageops::{FilterType, resize},
+};
 
 #[derive(Clone, Subcommand)]
 enum Subcommands {
@@ -23,6 +26,11 @@ enum Subcommands {
     },
     /// Get the height of an AVIF image.
     Height {
+        /// Path to the image to get the height of.
+        path: PathBuf,
+    },
+    /// Get the width of an AVIF image.
+    Width {
         /// Path to the image to get the height of.
         path: PathBuf,
     },
@@ -57,15 +65,17 @@ fn main() {
                 None => (src_width, src_height),
             };
 
-            let mut resized = Image::new(resized_width, resized_height, PixelType::U8x3);
-
-            let mut resizer = Resizer::new();
-            resizer.resize(&src_image, &mut resized, None).unwrap();
+            let resized = resize(
+                &src_image,
+                resized_width,
+                resized_height,
+                FilterType::Lanczos3,
+            );
 
             let file = File::create(out_path).unwrap();
             AvifEncoder::new_with_speed_quality(file, 10, 80)
                 .write_image(
-                    resized.buffer(),
+                    resized.as_bytes(),
                     resized_width,
                     resized_height,
                     ExtendedColorType::Rgb8,
@@ -77,6 +87,12 @@ fn main() {
             let ispe = bytes.windows(4).position(|b| b == b"ispe").unwrap();
             let height = u32::from_be_bytes(*bytes[ispe + 12..].first_chunk::<4>().unwrap());
             println!("{height}");
+        }
+        Subcommands::Width { path } => {
+            let bytes = read(&path).unwrap();
+            let ispe = bytes.windows(4).position(|b| b == b"ispe").unwrap();
+            let width = u32::from_be_bytes(*bytes[ispe + 8..].first_chunk::<4>().unwrap());
+            println!("{width}");
         }
     }
 }
