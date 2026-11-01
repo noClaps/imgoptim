@@ -1,6 +1,6 @@
 # imgoptim
 
-Losslessly compress PNG, JPEG and SVG images, and convert between PNG, JPEG, AVIF and HEIF.
+Losslessly compress PNG, JPEG and SVG images, and convert between PNG, JPEG and AVIF.
 
 ## Installation
 
@@ -27,7 +27,7 @@ Files are only rewritten when they get smaller, and the images stay the same:
 - **JPEG**: identical pixels; colour profile and orientation kept, other metadata removed.
 - **SVG**: minified like SVGO, but with numbers kept to 5 decimal places, so rendering doesn't
   visibly change.
-- **AVIF and HEIF**: left unchanged, as they can't be recompressed without losing quality.
+- **AVIF**: left unchanged, as it can't be recompressed without losing quality.
 
 PNGs are slow, around a minute for an 800×800 photo. Use `-i` to set fewer Zopfli iterations
 (default 15) and trade size for speed.
@@ -38,15 +38,15 @@ PNGs are slow, around a minute for an 800×800 photo. Use `-i` to set fewer Zopf
 imgoptim convert photo.jpg photo.png             # change format
 imgoptim convert photo.jpg -W 800 thumb.jpg      # 800px wide, height keeps the aspect ratio
 imgoptim convert icon.png -W 64 -H 64 small.png  # exact size
-imgoptim convert IMG_1234.heic -q 70 photo.avif  # lossy output at quality 70 (default 90)
+imgoptim convert photo.png -q 70 photo.avif      # lossy output at quality 70 (default 90)
 ```
 
 - The output format comes from the output file's extension.
 - With only `-W` or `-H`, the other side keeps the aspect ratio. With both, the image is
   stretched to fit.
-- JPEG, AVIF and HEIF output are lossy, set by `-q`. AVIF is slow, around 30 seconds for a
+- JPEG and AVIF output are lossy, set by `-q`. AVIF is slow, around 30 seconds for a
   1600×900 photo.
-- Colour is kept at full resolution (4:4:4), except in HEIF, whose encoder only writes 4:2:0.
+- Colour is kept at full resolution (4:4:4).
 - The colour profile is kept. AVIF can only store sRGB and Display P3, so other colour spaces are
   converted to Display P3.
 - Transparency becomes white in JPEGs, and is stored losslessly in AVIFs.

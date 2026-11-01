@@ -829,47 +829,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
-name = "heifer"
-version = "0.3.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56ff965ea29dc61da3a45b011c3f38294f710fc32f07de2b11ed0f387cc2a5df"
-dependencies = [
- "heifer-hevc-dec",
- "heifer-hevc-enc",
- "heifer-isobmff",
- "image",
- "thiserror",
-]
-
-[[package]]
-name = "heifer-hevc-dec"
-version = "0.3.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c45328becbf37c0cccc3e1e9127ba937950b084bf35bdb9f1f70145c70009290"
-dependencies = [
- "thiserror",
-]
-
-[[package]]
-name = "heifer-hevc-enc"
-version = "0.3.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "503629c478cf7628a4a5aae015df02ba5b5ed27b245ed15ed067c9625a9bd09b"
-dependencies = [
- "heifer-hevc-dec",
- "thiserror",
-]
-
-[[package]]
-name = "heifer-isobmff"
-version = "0.3.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8560c98c4ff16bb5a2d8d7f937bf0e3797f82f384e65d94fd878701ff03c71f2"
-dependencies = [
- "thiserror",
-]
-
-[[package]]
 name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1015,7 +974,6 @@ dependencies = [
  "argp",
  "avif-decode",
  "avif-serialize",
- "heifer",
  "image",
  "libc",
  "moxcms",

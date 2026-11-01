@@ -5,10 +5,6 @@ use std::{
     path::Path,
 };
 
-use heifer::{
-    EncodeOptions,
-    image_crate::{HeifDecoder, HeifEncoder},
-};
 use image::{
     ColorType, DynamicImage, GenericImageView, ImageDecoder, ImageEncoder, ImageReader, Rgb,
     RgbImage, codecs::png::PngEncoder, imageops, imageops::FilterType,
@@ -68,29 +64,19 @@ fn from_decoder(mut decoder: impl ImageDecoder) -> Result<Raster, String> {
 }
 
 fn decode(data: &[u8], format: Format) -> Result<Raster, String> {
-    match format {
-        Format::Heif => {
-            let decoder = HeifDecoder::new(Cursor::new(data)).map_err(|e| e.to_string())?;
-            let mut raster = from_decoder(decoder)?;
-            raster.icc_profile = raster.icc_profile.or_else(|| avif::colour_profile(data));
-            Ok(raster)
-        }
-        Format::Avif => {
-            let decoded = avif::decode(data)?;
-            Ok(Raster {
-                image: decoded.image,
-                icc_profile: decoded.icc_profile,
-            })
-        }
-        _ => {
-            let decoder = ImageReader::new(Cursor::new(data))
-                .with_guessed_format()
-                .map_err(|e| e.to_string())?
-                .into_decoder()
-                .map_err(|e| e.to_string())?;
-            from_decoder(decoder)
-        }
+    if format == Format::Avif {
+        let decoded = avif::decode(data)?;
+        return Ok(Raster {
+            image: decoded.image,
+            icc_profile: decoded.icc_profile,
+        });
     }
+    let decoder = ImageReader::new(Cursor::new(data))
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?
+        .into_decoder()
+        .map_err(|e| e.to_string())?;
+    from_decoder(decoder)
 }
 
 fn resize(raster: Raster, settings: &Settings) -> Raster {
@@ -201,25 +187,6 @@ fn encode_jpeg(raster: &Raster, settings: &Settings) -> Result<Vec<u8>, String> 
     )
 }
 
-fn encode_heif(raster: &Raster, settings: &Settings) -> Result<Vec<u8>, String> {
-    let mut data = Vec::new();
-    let options = EncodeOptions {
-        quality: settings.quality,
-        ..EncodeOptions::default()
-    };
-    let mut encoder = HeifEncoder::with_options(&mut data, options);
-    if let Some(icc_profile) = &raster.icc_profile {
-        encoder
-            .set_icc_profile(icc_profile.clone())
-            .map_err(|e| e.to_string())?;
-    }
-    raster
-        .image
-        .write_with_encoder(encoder)
-        .map_err(|e| e.to_string())?;
-    Ok(data)
-}
-
 fn encode(raster: &Raster, to: Format, settings: &Settings) -> Result<Vec<u8>, String> {
     match to {
         Format::Png => encode_png(raster, settings),
@@ -230,7 +197,6 @@ fn encode(raster: &Raster, to: Format, settings: &Settings) -> Result<Vec<u8>, S
             raster.icc_profile.as_deref(),
             settings.quality,
         ),
-        Format::Heif => encode_heif(raster, settings),
     }
 }
 
@@ -240,7 +206,7 @@ pub fn convert(input: &Path, output: &Path, settings: &Settings) -> Result<(), S
     let data = read(input).map_err(|e| e.to_string())?;
     let from = detect(input, &data).ok_or("not a supported image format")?;
     let to = Format::from_extension(output)
-        .ok_or("the output path must end in .png, .jpg, .jpeg, .avif, .heic or .heif")?;
+        .ok_or("the output path must end in .png, .jpg, .jpeg or .avif")?;
     if from == Format::Svg {
         return Err(SVG_UNSUPPORTED.to_owned());
     }

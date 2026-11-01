@@ -30,8 +30,8 @@ fn optimise(path: &Path, output: &Path, zopfli_iterations: NonZeroU64) -> Result
         Some(Format::Png) => Some(png::optimise(&data, zopfli_iterations)?),
         Some(Format::Jpeg) => Some(jpeg::optimise(&data)?),
         Some(Format::Svg) => Some(svg::optimise(&data)?),
-        // Their encoders are lossy, so re-encoding would change the image.
-        Some(Format::Avif | Format::Heif) => None,
+        // Its encoders are lossy, so re-encoding would change the image.
+        Some(Format::Avif) => None,
         None => return Err("not a supported image format".to_owned()),
     };
 

@@ -7,7 +7,6 @@ edition = "2024"
 argp = "0.4.1"
 avif-decode = { version = "3.0.0", default-features = false }
 avif-serialize = "0.8"
-heifer = { version = "0.3.15", features = ["image"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 libc = "0.2.191"
 moxcms = "0.8"

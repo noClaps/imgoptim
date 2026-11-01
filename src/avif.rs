@@ -2,8 +2,8 @@ use avif_decode::{Decoder, Image};
 use avif_serialize::{Aviffy, constants};
 use image::{DynamicImage, ImageBuffer, Rgba};
 use moxcms::{
-    CicpColorPrimaries, CicpProfile, ColorProfile, Layout, MatrixCoefficients,
-    TransferCharacteristics, TransformOptions,
+    CicpColorPrimaries, CicpProfile, ColorProfile, Layout, LocalizableString, MatrixCoefficients,
+    ProfileText, TransferCharacteristics, TransformOptions,
 };
 use rav1e::prelude::{
     ChromaSampling, ColorDescription, ColorPrimaries, Config, Context, EncoderConfig,
@@ -16,10 +16,10 @@ pub struct Decoded {
     pub icc_profile: Option<Vec<u8>>,
 }
 
-/// The colour space from the first `colr` box of an AVIF or HEIF file, as an ICC profile, or `None`
-/// for sRGB. AVIFs usually describe their colour space with CICP codes rather than a profile, so
+/// The colour space from the first `colr` box of an AVIF file, as an ICC profile, or `None` for
+/// sRGB. AVIFs usually describe their colour space with CICP codes rather than a profile, so
 /// those are turned into an equivalent profile.
-pub fn colour_profile(data: &[u8]) -> Option<Vec<u8>> {
+fn colour_profile(data: &[u8]) -> Option<Vec<u8>> {
     let start = data.windows(4).position(|w| w == b"colr")?.checked_sub(4)?;
     let size = u32::from_be_bytes(data.get(start..start + 4)?.try_into().ok()?);
     let payload = data.get(start + 8..start + usize::try_from(size).ok()?)?;
@@ -41,7 +41,18 @@ pub fn colour_profile(data: &[u8]) -> Option<Vec<u8>> {
                 matrix_coefficients: MatrixCoefficients::try_from(matrix).ok()?,
                 full_range: payload.get(10).is_some_and(|flags| flags & 0x80 != 0),
             };
-            ColorProfile::new_from_cicp(cicp).encode().ok()
+            let mut profile = ColorProfile::new_from_cicp(cicp);
+            // Name it, since apps show the profile's description.
+            let name = match (primaries, transfer) {
+                (12, 13) => "Display P3".to_owned(),
+                _ => format!("CICP {primaries}/{transfer}/{matrix}"),
+            };
+            profile.description = Some(ProfileText::Localizable(vec![LocalizableString::new(
+                "en".to_owned(),
+                "US".to_owned(),
+                name,
+            )]));
+            profile.encode().ok()
         }
         _ => None,
     }

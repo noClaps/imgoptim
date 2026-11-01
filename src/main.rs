@@ -14,7 +14,7 @@ use std::{
 
 use argp::FromArgs;
 
-/// Optimise and convert PNG, JPEG, SVG, AVIF and HEIF images.
+/// Optimise and convert PNG, JPEG, SVG and AVIF images.
 #[derive(FromArgs)]
 struct Args {
     #[argp(subcommand)]
@@ -28,8 +28,8 @@ enum Command {
     Convert(ConvertArgs),
 }
 
-/// Losslessly compress PNG, JPEG and SVG images at maximum effort. AVIF and HEIF files are left as
-/// they are, since they can't be recompressed losslessly.
+/// Losslessly compress PNG, JPEG and SVG images at maximum effort. AVIF files are left as they are,
+/// since they can't be recompressed losslessly.
 #[derive(FromArgs)]
 #[argp(subcommand, name = "optimise")]
 struct OptimiseArgs {
@@ -56,7 +56,7 @@ struct OptimiseArgs {
     paths: Vec<PathBuf>,
 }
 
-/// Convert an image between PNG, JPEG, AVIF and HEIF, optionally resizing it. The output format
+/// Convert an image between PNG, JPEG and AVIF, optionally resizing it. The output format
 /// comes from the output path's extension.
 #[derive(FromArgs)]
 #[argp(subcommand, name = "convert")]
@@ -69,7 +69,7 @@ struct ConvertArgs {
     #[argp(option, short = 'H', from_str_fn(parse_dimension))]
     height: Option<NonZeroU32>,
 
-    /// Quality from 1 to 100 for lossy output: JPEG, AVIF and HEIF (default: 90).
+    /// Quality from 1 to 100 for lossy output: JPEG and AVIF (default: 90).
     #[argp(option, short = 'q', default = "90", from_str_fn(parse_quality))]
     quality: u8,
 
@@ -86,7 +86,7 @@ struct ConvertArgs {
     #[argp(positional)]
     input: PathBuf,
 
-    /// Where to write the converted image, ending in .png, .jpg, .jpeg, .avif, .heic or .heif.
+    /// Where to write the converted image, ending in .png, .jpg, .jpeg or .avif.
     #[argp(positional)]
     output: PathBuf,
 }
@@ -117,7 +117,6 @@ enum Format {
     Jpeg,
     Svg,
     Avif,
-    Heif,
 }
 
 impl Format {
@@ -129,8 +128,6 @@ impl Format {
             ("jpeg", Self::Jpeg),
             ("svg", Self::Svg),
             ("avif", Self::Avif),
-            ("heic", Self::Heif),
-            ("heif", Self::Heif),
         ]
         .into_iter()
         .find(|(ext, _)| extension.eq_ignore_ascii_case(ext))
@@ -138,13 +135,18 @@ impl Format {
     }
 }
 
-/// Tell AVIF from HEIF by the brands in an ISO media file's `ftyp` box.
-fn isobmff_format(data: &[u8]) -> Option<Format> {
-    if data.get(4..8)? != b"ftyp" {
-        return None;
+/// Whether an ISO media file's `ftyp` box lists an AVIF brand.
+fn is_avif(data: &[u8]) -> bool {
+    if data.get(4..8) != Some(b"ftyp") {
+        return false;
     }
-    let size = u32::from_be_bytes(data.get(..4)?.try_into().ok()?) as usize;
-    let ftyp = data.get(8..size.min(data.len()))?;
+    let Some(size) = data.get(..4).and_then(|size| size.try_into().ok()) else {
+        return false;
+    };
+    let size = u32::from_be_bytes(size) as usize;
+    let Some(ftyp) = data.get(8..size.min(data.len())) else {
+        return false;
+    };
     // The major brand, then the compatible brands after the minor version.
     let brands: Vec<&[u8]> = ftyp
         .get(..4)
@@ -158,20 +160,9 @@ fn isobmff_format(data: &[u8]) -> Option<Format> {
                 .map(<[u8; 4]>::as_slice),
         )
         .collect();
-    let has = |names: &[&[u8; 4]]| {
-        brands
-            .iter()
-            .any(|brand| names.iter().any(|name| *brand == *name))
-    };
-    if has(&[b"avif", b"avis"]) {
-        Some(Format::Avif)
-    } else if has(&[
-        b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"mif1", b"msf1",
-    ]) {
-        Some(Format::Heif)
-    } else {
-        None
-    }
+    brands
+        .iter()
+        .any(|brand| matches!(*brand, b"avif" | b"avis"))
 }
 
 fn detect(path: &Path, data: &[u8]) -> Option<Format> {
@@ -179,8 +170,8 @@ fn detect(path: &Path, data: &[u8]) -> Option<Format> {
         Some(Format::Png)
     } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
         Some(Format::Jpeg)
-    } else if let Some(format) = isobmff_format(data) {
-        Some(format)
+    } else if is_avif(data) {
+        Some(Format::Avif)
     } else if matches!(Format::from_extension(path), Some(Format::Svg))
         || data.trim_ascii_start().starts_with(b"<")
     {
