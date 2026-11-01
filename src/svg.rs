@@ -1,4 +1,4 @@
-use std::{cmp::Reverse, num::NonZeroU32, ops::Range};
+use std::{cmp::Reverse, fmt::Write, num::NonZeroU32, ops::Range};
 
 use oxvg_ast::{
     parse::roxmltree::{ParsingOptions, parse_with_options},
@@ -100,11 +100,13 @@ pub fn resize(
             .ok_or("unterminated root element")?;
     let mut attributes = format!(r#" width="{new_width}" height="{new_height}""#);
     if root.attribute("viewBox").is_none() {
-        attributes += &format!(
+        write!(
+            attributes,
             r#" viewBox="0 0 {} {}""#,
             original.width(),
             original.height()
-        );
+        )
+        .expect("writing to a String can't fail");
     }
     edits.push((name_end..name_end, attributes));
     edits.sort_by_key(|(range, _)| Reverse(range.start));

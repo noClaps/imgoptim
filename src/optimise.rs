@@ -1,5 +1,5 @@
 use std::{
-    fs::{create_dir_all, read, read_dir, write},
+    fs::{DirEntry, create_dir_all, read, read_dir, write},
     io::{self, Write},
     num::NonZeroU64,
     path::{Path, PathBuf},
@@ -12,7 +12,7 @@ use crate::{Format, OptimiseArgs, detect, jpeg, jxl, png, svg, webp};
 /// directories aren't followed, so links can't cause loops.
 fn find_images(dir: &Path, images: &mut Vec<PathBuf>) -> io::Result<()> {
     let mut entries = read_dir(dir)?.collect::<io::Result<Vec<_>>>()?;
-    entries.sort_by_key(|entry| entry.file_name());
+    entries.sort_by_key(DirEntry::file_name);
     for entry in entries {
         let path = entry.path();
         if entry.file_type()?.is_dir() {
@@ -57,17 +57,21 @@ fn optimise(path: &Path, output: &Path, zopfli_iterations: NonZeroU64) -> Result
     if after < before || output != path {
         write(output, &result).map_err(|e| e.to_string())?;
     }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "f64 holds file sizes exactly up to 8 PiB, and only two decimals are shown"
+    )]
+    let change = (after as f64 - before as f64) / before as f64 * 100.0;
     // Ignore failures, e.g. when piped into `head`, so the remaining images still get optimised.
     let _ = writeln!(
         io::stdout(),
-        "{}: {before} → {after} bytes ({:.2}%){note}",
+        "{}: {before} → {after} bytes ({change:.2}%){note}",
         path.display(),
-        (after as f64 - before as f64) / before as f64 * 100.0
     );
     Ok(())
 }
 
-pub fn run(args: OptimiseArgs) -> ExitCode {
+pub fn run(args: &OptimiseArgs) -> ExitCode {
     if args.paths.is_empty() {
         eprintln!("No images given. Run with --help for usage.");
         return ExitCode::FAILURE;

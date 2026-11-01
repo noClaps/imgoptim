@@ -167,7 +167,7 @@ fn isobmff_format(data: &[u8]) -> Option<Format> {
                 .as_chunks::<4>()
                 .0
                 .iter()
-                .map(|brand| brand.as_slice()),
+                .map(<[u8; 4]>::as_slice),
         )
         .collect();
     let has = |names: &[&[u8; 4]]| {
@@ -209,7 +209,7 @@ fn detect(path: &Path, data: &[u8]) -> Option<Format> {
 fn main() -> ExitCode {
     let args: Args = argp::parse_args_or_exit(argp::DEFAULT);
     match args.command {
-        Command::Optimise(args) => optimise::run(args),
+        Command::Optimise(args) => optimise::run(&args),
         Command::Convert(args) => {
             let settings = convert::Settings {
                 width: args.width,

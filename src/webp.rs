@@ -1,6 +1,10 @@
 use std::{ffi::c_void, mem, slice};
 
-use libwebp_sys::*;
+use libwebp_sys::{
+    WebPConfig, WebPConfigLosslessPreset, WebPDecodeRGBA, WebPEncode, WebPFree, WebPMemoryWrite,
+    WebPMemoryWriter, WebPMemoryWriterClear, WebPMemoryWriterInit, WebPPicture, WebPPictureFree,
+    WebPPictureImportRGBA,
+};
 
 /// VP8X flag bits, as laid out in the first byte of its payload.
 const ICC_FLAG: u8 = 0x20;
@@ -33,18 +37,26 @@ fn chunks(data: &[u8]) -> Option<Vec<Chunk<'_>>> {
     Some(chunks)
 }
 
+/// The 32-bit size field of a RIFF chunk. WebP's 16383-pixel size limit keeps every chunk well
+/// under 4 GiB.
+fn riff_size(length: usize) -> [u8; 4] {
+    u32::try_from(length)
+        .expect("WebP chunks are under 4 GiB")
+        .to_le_bytes()
+}
+
 fn assemble(chunks: &[Chunk]) -> Vec<u8> {
     let mut body = b"WEBP".to_vec();
     for chunk in chunks {
         body.extend_from_slice(&chunk.id);
-        body.extend_from_slice(&(chunk.data.len() as u32).to_le_bytes());
+        body.extend_from_slice(&riff_size(chunk.data.len()));
         body.extend_from_slice(chunk.data);
         if chunk.data.len() % 2 == 1 {
             body.push(0);
         }
     }
     let mut file = b"RIFF".to_vec();
-    file.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    file.extend_from_slice(&riff_size(body.len()));
     file.extend(body);
     file
 }
@@ -95,15 +107,18 @@ fn with_icc_profile(
     has_alpha: bool,
 ) -> Vec<u8> {
     let chunks = chunks(encoded).expect("libwebp writes valid files");
-    let mut vp8x = match chunks.iter().find(|chunk| &chunk.id == b"VP8X") {
-        Some(header) => header.data.to_vec(),
-        None => {
-            let mut header = vec![if has_alpha { ALPHA_FLAG } else { 0 }, 0, 0, 0];
-            header.extend_from_slice(&(width - 1).to_le_bytes()[..3]);
-            header.extend_from_slice(&(height - 1).to_le_bytes()[..3]);
-            header
-        }
-    };
+    let mut vp8x = chunks
+        .iter()
+        .find(|chunk| &chunk.id == b"VP8X")
+        .map_or_else(
+            || {
+                let mut header = vec![if has_alpha { ALPHA_FLAG } else { 0 }, 0, 0, 0];
+                header.extend_from_slice(&(width - 1).to_le_bytes()[..3]);
+                header.extend_from_slice(&(height - 1).to_le_bytes()[..3]);
+                header
+            },
+            |header| header.data.to_vec(),
+        );
     vp8x[0] |= ICC_FLAG;
 
     let mut assembled = vec![
@@ -124,13 +139,15 @@ fn with_icc_profile(
 pub fn decode(data: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     unsafe {
         let (mut width, mut height) = (0, 0);
-        let pixels = WebPDecodeRGBA(data.as_ptr(), data.len(), &mut width, &mut height);
+        let pixels = WebPDecodeRGBA(data.as_ptr(), data.len(), &raw mut width, &raw mut height);
         if pixels.is_null() {
             return None;
         }
+        // libwebp only returns pixels with a positive size.
+        let (width, height) = (width.cast_unsigned(), height.cast_unsigned());
         let rgba = slice::from_raw_parts(pixels, width as usize * height as usize * 4).to_vec();
         WebPFree(pixels.cast());
-        Some((rgba, width as u32, height as u32))
+        Some((rgba, width, height))
     }
 }
 
@@ -143,12 +160,17 @@ pub fn encode(
     quality: Option<u8>,
     icc_profile: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
+    let too_large = |_| "the image is too large for WebP";
+    let (width_i32, height_i32) = (
+        i32::try_from(width).map_err(too_large)?,
+        i32::try_from(height).map_err(too_large)?,
+    );
     let encoded = unsafe {
         let mut config = WebPConfig::new().map_err(|()| "libwebp version mismatch")?;
         match quality {
             None => {
                 // Equivalent to `cwebp -lossless -z 9`.
-                WebPConfigLosslessPreset(&mut config, 9);
+                WebPConfigLosslessPreset(&raw mut config, 9);
                 config.exact = 0;
             }
             Some(quality) => {
@@ -166,23 +188,26 @@ pub fn encode(
 
         let mut picture = WebPPicture::new().map_err(|()| "libwebp version mismatch")?;
         picture.use_argb = 1;
-        picture.width = width as i32;
-        picture.height = height as i32;
-        if WebPPictureImportRGBA(&mut picture, rgba.as_ptr(), width as i32 * 4) == 0 {
-            WebPPictureFree(&mut picture);
+        picture.width = width_i32;
+        picture.height = height_i32;
+        let stride = width_i32
+            .checked_mul(4)
+            .ok_or("the image is too large for WebP")?;
+        if WebPPictureImportRGBA(&raw mut picture, rgba.as_ptr(), stride) == 0 {
+            WebPPictureFree(&raw mut picture);
             return Err("out of memory".to_owned());
         }
 
         let mut writer: WebPMemoryWriter = mem::zeroed();
-        WebPMemoryWriterInit(&mut writer);
+        WebPMemoryWriterInit(&raw mut writer);
         picture.writer = Some(WebPMemoryWrite);
         picture.custom_ptr = (&raw mut writer).cast::<c_void>();
-        let succeeded = WebPEncode(&config, &mut picture) != 0;
+        let succeeded = WebPEncode(&raw const config, &raw mut picture) != 0;
         let error = picture.error_code;
-        WebPPictureFree(&mut picture);
+        WebPPictureFree(&raw mut picture);
 
         let encoded = slice::from_raw_parts(writer.mem, writer.size).to_vec();
-        WebPMemoryWriterClear(&mut writer);
+        WebPMemoryWriterClear(&raw mut writer);
         if !succeeded {
             return Err(format!("WebP encoding failed: {error:?}"));
         }
@@ -209,8 +234,9 @@ fn looks_identical(a: &[u8], b: &[u8]) -> bool {
             .all(|(a, b)| a[3] == b[3] && (a[3] == 0 || a == b))
 }
 
-/// Strip metadata that doesn't affect display, and re-encode lossless WebPs at maximum effort,
-/// keeping whichever is smallest. Lossy and animated WebPs only have their metadata stripped.
+/// Strip metadata that doesn't affect display, and re-encode lossless WebP files at maximum
+/// effort, keeping whichever is smallest. Lossy and animated files only have their metadata
+/// stripped.
 pub fn optimise(data: &[u8]) -> Result<Vec<u8>, String> {
     let chunks = chunks(data)
         .filter(|chunks| {
@@ -243,6 +269,10 @@ pub fn optimise(data: &[u8]) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the gradient wraps around on purpose"
+    )]
     fn gradient(width: u32, height: u32) -> Vec<u8> {
         (0..height)
             .flat_map(|y| {

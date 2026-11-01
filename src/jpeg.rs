@@ -1,11 +1,19 @@
 use std::{
-    ffi::{CStr, c_int, c_ulong},
+    ffi::{CStr, c_int, c_uint, c_ulong},
     mem,
     panic::{self, AssertUnwindSafe},
     ptr, slice,
 };
 
-use mozjpeg_sys::*;
+use mozjpeg_sys::{
+    J_BOOLEAN_PARAM, J_COLOR_SPACE, jpeg_c_set_bool_param, jpeg_common_struct,
+    jpeg_compress_struct, jpeg_copy_critical_parameters, jpeg_create_compress,
+    jpeg_create_decompress, jpeg_decompress_struct, jpeg_destroy_compress, jpeg_destroy_decompress,
+    jpeg_error_mgr, jpeg_finish_compress, jpeg_finish_decompress, jpeg_mem_dest, jpeg_mem_src,
+    jpeg_read_coefficients, jpeg_read_header, jpeg_save_markers, jpeg_set_defaults,
+    jpeg_set_quality, jpeg_simple_progression, jpeg_start_compress, jpeg_std_error,
+    jpeg_write_coefficients, jpeg_write_marker, jpeg_write_scanlines, jvirt_barray_control,
+};
 
 const APP1: c_int = 0xE1;
 const APP2: c_int = 0xE2;
@@ -20,9 +28,10 @@ unsafe extern "C-unwind" fn error_exit(cinfo: &mut jpeg_common_struct) {
             format_message(cinfo, &buffer);
         }
     }
-    let message = CStr::from_bytes_until_nul(&buffer)
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "unknown JPEG error".to_owned());
+    let message = CStr::from_bytes_until_nul(&buffer).map_or_else(
+        |_| "unknown JPEG error".to_owned(),
+        |s| s.to_string_lossy().into_owned(),
+    );
     panic::resume_unwind(Box::new(message));
 }
 
@@ -43,15 +52,15 @@ unsafe fn error_manager() -> Box<jpeg_error_mgr> {
 fn catch<T>(f: impl FnOnce() -> T) -> Result<T, String> {
     panic::catch_unwind(AssertUnwindSafe(f)).map_err(|e| {
         e.downcast::<String>()
-            .map(|message| *message)
-            .unwrap_or_else(|_| "unknown JPEG error".to_owned())
+            .map_or_else(|_| "unknown JPEG error".to_owned(), |message| *message)
     })
 }
 
 /// Copy out and free a buffer filled by `jpeg_mem_dest`.
 unsafe fn take_output(out: &mut *mut u8, size: c_ulong) -> Vec<u8> {
     unsafe {
-        let result = slice::from_raw_parts(*out, size as usize).to_vec();
+        let size = usize::try_from(size).expect("an in-memory buffer's size fits in usize");
+        let result = slice::from_raw_parts(*out, size).to_vec();
         libc::free(out.cast());
         *out = ptr::null_mut();
         result
@@ -148,10 +157,11 @@ unsafe fn transcode(
         }
 
         let mut size: c_ulong = 0;
-        jpeg_mem_dest(dst, out, &mut size);
+        jpeg_mem_dest(dst, out, &raw mut size);
         jpeg_write_coefficients(dst, coefficients);
         for (code, data) in markers {
-            jpeg_write_marker(dst, *code, data.as_ptr(), data.len() as _);
+            let length = c_uint::try_from(data.len()).expect("JPEG markers are under 64 KiB");
+            jpeg_write_marker(dst, *code, data.as_ptr(), length);
         }
         jpeg_finish_compress(dst);
         take_output(out, size)
@@ -177,13 +187,13 @@ fn recompress(data: &[u8], progressive_modes: &[bool]) -> Result<Vec<u8>, String
         let mut err = error_manager();
         let mut src: Box<jpeg_decompress_struct> = Box::new(mem::zeroed());
         let mut dst: Box<jpeg_compress_struct> = Box::new(mem::zeroed());
-        src.common.err = &mut *err;
-        dst.common.err = &mut *err;
+        src.common.err = &raw mut *err;
+        dst.common.err = &raw mut *err;
         let mut out: *mut u8 = ptr::null_mut();
 
         let result = catch(|| {
-            jpeg_create_decompress(&mut *src);
-            jpeg_create_compress(&mut *dst);
+            jpeg_create_decompress(&raw mut *src);
+            jpeg_create_compress(&raw mut *dst);
 
             jpeg_mem_src(&mut src, data.as_ptr(), data.len() as _);
             jpeg_save_markers(&mut src, APP1, 0xFFFF);
@@ -231,14 +241,19 @@ pub fn encode(
     quality: u8,
     icc_profile: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
+    // Each APP2 marker numbers itself and the total in a byte.
+    let icc_chunks = icc_profile.map_or(0, |icc| icc.chunks(ICC_CHUNK_SIZE).len());
+    let icc_chunk_count =
+        u8::try_from(icc_chunks).map_err(|_| "ICC profile is too large for JPEG")?;
+
     unsafe {
         let mut err = error_manager();
         let mut dst: Box<jpeg_compress_struct> = Box::new(mem::zeroed());
-        dst.common.err = &mut *err;
+        dst.common.err = &raw mut *err;
         let mut out: *mut u8 = ptr::null_mut();
 
         let result = catch(|| {
-            jpeg_create_compress(&mut *dst);
+            jpeg_create_compress(&raw mut *dst);
             dst.image_width = width;
             dst.image_height = height;
             dst.input_components = 3;
@@ -248,14 +263,14 @@ pub fn encode(
             dst.optimize_coding = 1;
 
             let mut size: c_ulong = 0;
-            jpeg_mem_dest(&mut dst, &mut out, &mut size);
+            jpeg_mem_dest(&mut dst, &raw mut out, &raw mut size);
             jpeg_start_compress(&mut dst, 1);
             if let Some(icc) = icc_profile {
-                let chunks = icc.chunks(ICC_CHUNK_SIZE);
-                let count = chunks.len() as u8;
-                for (i, chunk) in chunks.enumerate() {
-                    let marker = [ICC_SIGNATURE, &[i as u8 + 1, count], chunk].concat();
-                    jpeg_write_marker(&mut dst, APP2, marker.as_ptr(), marker.len() as _);
+                for (sequence, chunk) in (1..=icc_chunk_count).zip(icc.chunks(ICC_CHUNK_SIZE)) {
+                    let marker = [ICC_SIGNATURE, &[sequence, icc_chunk_count], chunk].concat();
+                    let length =
+                        c_uint::try_from(marker.len()).expect("ICC chunks fit in a marker");
+                    jpeg_write_marker(&mut dst, APP2, marker.as_ptr(), length);
                 }
             }
             for row in rgb.chunks_exact(width as usize * 3) {
@@ -275,9 +290,17 @@ pub fn encode(
 
 #[cfg(test)]
 mod tests {
+    use mozjpeg_sys::{
+        J_INT_PARAM, JCOEF, JINT_COMPRESS_PROFILE_VALUE, jpeg_c_set_int_param, jpeg_marker,
+    };
+
     use super::*;
 
     /// Encode a synthetic RGB image the way plain libjpeg would: baseline, default Huffman tables.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the channel values are all at most 255"
+    )]
     fn encode_baseline(width: u32, height: u32, markers: &[(c_int, &[u8])]) -> Vec<u8> {
         let pixels: Vec<u8> = (0..height)
             .flat_map(|y| {
@@ -296,8 +319,8 @@ mod tests {
             jpeg_std_error(&mut err);
             err.error_exit = Some(error_exit);
             let mut dst: jpeg_compress_struct = mem::zeroed();
-            dst.common.err = &mut err;
-            jpeg_create_compress(&mut dst);
+            dst.common.err = &raw mut err;
+            jpeg_create_compress(&raw mut dst);
 
             dst.image_width = width;
             dst.image_height = height;
@@ -313,10 +336,11 @@ mod tests {
 
             let mut out: *mut u8 = ptr::null_mut();
             let mut size: c_ulong = 0;
-            jpeg_mem_dest(&mut dst, &mut out, &mut size);
+            jpeg_mem_dest(&mut dst, &raw mut out, &raw mut size);
             jpeg_start_compress(&mut dst, 1);
             for (code, data) in markers {
-                jpeg_write_marker(&mut dst, *code, data.as_ptr(), data.len() as _);
+                let length = c_uint::try_from(data.len()).unwrap();
+                jpeg_write_marker(&mut dst, *code, data.as_ptr(), length);
             }
             for row in pixels.chunks_exact(width as usize * 3) {
                 jpeg_write_scanlines(&mut dst, &row.as_ptr(), 1);
@@ -324,7 +348,7 @@ mod tests {
             jpeg_finish_compress(&mut dst);
             jpeg_destroy_compress(&mut dst);
 
-            let result = slice::from_raw_parts(out, size as usize).to_vec();
+            let result = slice::from_raw_parts(out, usize::try_from(size).unwrap()).to_vec();
             libc::free(out.cast());
             result
         }
@@ -338,15 +362,15 @@ mod tests {
             jpeg_std_error(&mut err);
             err.error_exit = Some(error_exit);
             let mut src: jpeg_decompress_struct = mem::zeroed();
-            src.common.err = &mut err;
-            jpeg_create_decompress(&mut src);
+            src.common.err = &raw mut err;
+            jpeg_create_decompress(&raw mut src);
             jpeg_mem_src(&mut src, data.as_ptr(), data.len() as _);
             jpeg_read_header(&mut src, 1);
 
             let arrays = jpeg_read_coefficients(&mut src);
             let access = (*src.common.mem).access_virt_barray.unwrap();
             let mut components = Vec::new();
-            for c in 0..src.num_components as usize {
+            for c in 0..usize::try_from(src.num_components).unwrap() {
                 let info = &*src.comp_info.add(c);
                 let mut coefs = Vec::new();
                 for row in 0..info.height_in_blocks {

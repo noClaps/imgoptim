@@ -26,3 +26,6 @@ roxmltree = "0.21"
 # usual C toolchain, so it's only enabled there.
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 ravif = { version = "0.13.0", default-features = false, features = ["asm", "threading"] }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }

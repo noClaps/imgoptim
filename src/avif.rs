@@ -9,7 +9,10 @@ pub fn decode(data: &[u8]) -> Result<DynamicImage, String> {
 
     macro_rules! convert {
         ($image:expr, $variant:ident, |$pixel:ident| $channels:expr) => {{
-            let (width, height) = ($image.width() as u32, $image.height() as u32);
+            let size = |pixels: usize| {
+                u32::try_from(pixels).expect("AV1 frames are under 65536 pixels a side")
+            };
+            let (width, height) = (size($image.width()), size($image.height()));
             let samples = $image.pixels().flat_map(|$pixel| $channels).collect();
             DynamicImage::$variant(
                 ImageBuffer::from_raw(width, height, samples).expect("buffer matches its size"),
@@ -56,6 +59,10 @@ mod tests {
     use super::*;
 
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the channel values are all at most 255"
+    )]
     fn round_trip() {
         let image = DynamicImage::ImageRgba8(RgbaImage::from_fn(40, 24, |x, y| {
             image::Rgba([

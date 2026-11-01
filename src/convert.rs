@@ -29,6 +29,11 @@ pub struct Settings {
 
 /// The output size for an image of `original` size. A missing dimension is scaled to keep the
 /// original aspect ratio, and with neither given the original size is kept.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "float-to-integer casts saturate, which is the right behaviour for a pixel size"
+)]
 pub fn target_size(
     (original_width, original_height): (f64, f64),
     width: Option<NonZeroU32>,
@@ -113,6 +118,10 @@ fn rasterise(data: &[u8], path: &Path, settings: &Settings) -> Result<Raster, St
         settings.height,
     );
     let mut pixmap = tiny_skia::Pixmap::new(width, height).ok_or("output size is too large")?;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "f32 holds every whole number up to 2^24, far beyond any renderable size"
+    )]
     let transform = tiny_skia::Transform::from_scale(
         width as f32 / size.width(),
         height as f32 / size.height(),
@@ -176,8 +185,10 @@ fn encode_jpeg(raster: &Raster, settings: &Settings) -> Result<Vec<u8>, String> 
     let rgba = raster.image.to_rgba8();
     let rgb = RgbImage::from_fn(rgba.width(), rgba.height(), |x, y| {
         let [r, g, b, a] = rgba.get_pixel(x, y).0;
-        let blend =
-            |c: u8| ((u32::from(c) * u32::from(a) + 255 * (255 - u32::from(a)) + 127) / 255) as u8;
+        let blend = |c: u8| {
+            let blended = (u32::from(c) * u32::from(a) + 255 * (255 - u32::from(a)) + 127) / 255;
+            u8::try_from(blended).expect("a blend of two bytes fits in a byte")
+        };
         Rgb([blend(r), blend(g), blend(b)])
     });
     jpeg::encode(

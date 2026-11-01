@@ -7,7 +7,10 @@ use jxl_encoder::{
     quality_to_distance,
 };
 use jxl_image_rs_integration::JxlDecoder;
-use jxl_oxide::{JxlImage, image::BitDepth};
+use jxl_oxide::{
+    JxlImage,
+    image::{BitDepth, ExtraChannelInfo},
+};
 
 /// The encoder's two highest efforts, which add optimal LZ77 parsing and the most thorough
 /// searches. Neither always wins, so both are tried.
@@ -179,7 +182,7 @@ pub fn optimise(data: &[u8]) -> Result<Vec<u8>, String> {
     let metadata = &header.image_header().metadata;
     let stored_losslessly = !metadata.xyb_encoded
         && metadata.animation.is_none()
-        && metadata.ec_info.iter().all(|channel| channel.is_alpha())
+        && metadata.ec_info.iter().all(ExtraChannelInfo::is_alpha)
         && metadata.ec_info.len() <= 1
         && matches!(metadata.bit_depth, BitDepth::IntegerSample { bits_per_sample } if bits_per_sample <= 16);
     if stored_losslessly {
@@ -202,6 +205,10 @@ mod tests {
 
     use super::*;
 
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the gradient wraps around on purpose"
+    )]
     fn gradient() -> DynamicImage {
         DynamicImage::ImageRgb8(RgbImage::from_fn(48, 32, |x, y| {
             image::Rgb([(x * 5) as u8, (y * 7) as u8, (x ^ y) as u8])
@@ -218,6 +225,10 @@ mod tests {
 
     /// Images over 256 pixels span several groups, which some decoders mishandle.
     #[test]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the pattern wraps around on purpose"
+    )]
     fn large_lossless_round_trip() {
         let image = DynamicImage::ImageRgb8(RgbImage::from_fn(300, 280, |x, y| {
             image::Rgb([(x * 7 + y) as u8, (y * 3) as u8, ((x * y) >> 4) as u8])
@@ -242,7 +253,7 @@ mod tests {
         } else {
             // Wrap the bare codestream in a container.
             let codestream = [
-                &((encoded.len() + 8) as u32).to_be_bytes()[..],
+                &u32::try_from(encoded.len() + 8).unwrap().to_be_bytes()[..],
                 b"jxlc",
                 &encoded,
             ]
