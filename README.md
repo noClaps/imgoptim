@@ -7,7 +7,7 @@ A command line utility to optimise images.
 You'll need [Rust](https://rust-lang.org).
 
 ```sh
-cargo install --git https://codeberg.org/noClaps/imgoptim
+cargo install --git https://github.com/noClaps/imgoptim
 ```
 
 ## Usage
