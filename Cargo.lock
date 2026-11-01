@@ -1014,7 +1014,7 @@ version = "0.1.0"
 dependencies = [
  "argp",
  "avif-decode",
- "avif-parse",
+ "avif-serialize",
  "heifer",
  "image",
  "libc",
@@ -1023,7 +1023,7 @@ dependencies = [
  "oxipng",
  "oxvg_ast",
  "oxvg_optimiser",
- "ravif",
+ "rav1e",
 ]
 
 [[package]]
@@ -1276,15 +1276,6 @@ name = "log"
 version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
-
-[[package]]
-name = "loop9"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fae87c125b03c1d2c0150c90365d7d6bcc53fb73a9acaef207d2d065860f062"
-dependencies = [
- "imgref",
-]
 
 [[package]]
 name = "maybe-rayon"
@@ -2026,22 +2017,6 @@ dependencies = [
  "simd_helpers",
  "thiserror",
  "v_frame",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "ravif"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e52310197d971b0f5be7fe6b57530dcd27beb35c1b013f29d66c1ad73fbbcc45"
-dependencies = [
- "avif-serialize",
- "imgref",
- "loop9",
- "quick-error",
- "rav1e",
- "rayon",
- "rgb",
 ]
 
 [[package]]

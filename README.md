@@ -20,12 +20,13 @@ imgoptim optimise -r assets                      # every image in a folder, recu
 imgoptim optimise -r assets -o dist/assets       # write to dist/assets, mirroring the folder structure
 ```
 
-Files are only rewritten when they get smaller, and the images look the same:
+Files are only rewritten when they get smaller, and the images stay the same:
 
-- **PNG**: identical pixels; colour profile kept, other metadata removed.
+- **PNG**: identical pixels, including fully transparent ones; colour profile kept, other
+  metadata removed.
 - **JPEG**: identical pixels; colour profile and orientation kept, other metadata removed.
-- **SVG**: minified like SVGO. Numbers are rounded to 3 decimal places, which can shift edges by
-  a fraction of a pixel.
+- **SVG**: minified like SVGO, but with numbers kept to 5 decimal places, so rendering doesn't
+  visibly change.
 - **AVIF and HEIF**: left unchanged, as they can't be recompressed without losing quality.
 
 PNGs are slow, around a minute for an 800×800 photo. Use `-i` to set fewer Zopfli iterations
@@ -37,15 +38,18 @@ PNGs are slow, around a minute for an 800×800 photo. Use `-i` to set fewer Zopf
 imgoptim convert photo.jpg photo.png             # change format
 imgoptim convert photo.jpg -W 800 thumb.jpg      # 800px wide, height keeps the aspect ratio
 imgoptim convert icon.png -W 64 -H 64 small.png  # exact size
-imgoptim convert IMG_1234.heic -q 70 photo.avif  # lossy output at quality 70 (default 85)
+imgoptim convert IMG_1234.heic -q 70 photo.avif  # lossy output at quality 70 (default 90)
 ```
 
 - The output format comes from the output file's extension.
 - With only `-W` or `-H`, the other side keeps the aspect ratio. With both, the image is
   stretched to fit.
-- Output is compressed as much as possible. JPEG, AVIF and HEIF output are lossy, set by `-q`;
-  AVIF is slow, around 13 seconds for a 1600×900 photo.
-- Transparency becomes white in JPEGs.
+- JPEG, AVIF and HEIF output are lossy, set by `-q`. AVIF is slow, around 30 seconds for a
+  1600×900 photo.
+- Colour is kept at full resolution (4:4:4), except in HEIF, whose encoder only writes 4:2:0.
+- The colour profile is kept. AVIF can only store sRGB and Display P3, so other colour spaces are
+  converted to Display P3.
+- Transparency becomes white in JPEGs, and is stored losslessly in AVIFs.
 - SVGs can only be optimised, not converted.
 
 Run `imgoptim <command> --help` for every option.

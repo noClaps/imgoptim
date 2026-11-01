@@ -10,11 +10,11 @@ use heifer::{
     image_crate::{HeifDecoder, HeifEncoder},
 };
 use image::{
-    DynamicImage, GenericImageView, ImageDecoder, ImageEncoder, ImageReader, Rgb, RgbImage,
-    codecs::png::PngEncoder, imageops::FilterType, metadata::Orientation,
+    ColorType, DynamicImage, GenericImageView, ImageDecoder, ImageEncoder, ImageReader, Rgb,
+    RgbImage, codecs::png::PngEncoder, imageops, imageops::FilterType,
 };
 
-use crate::{ChromaSubsampling, Format, avif, detect, jpeg, png};
+use crate::{Format, avif, detect, jpeg, png};
 
 const SVG_UNSUPPORTED: &str = "SVGs can only be optimised, not converted";
 
@@ -52,55 +52,26 @@ fn target_size(
     }
 }
 
-/// Decoded pixels along with the colour profile they're in and the chroma subsampling they were
-/// stored with, if any.
+/// Decoded pixels along with the colour profile they're in.
 struct Raster {
     image: DynamicImage,
     icc_profile: Option<Vec<u8>>,
-    chroma_subsampling: Option<ChromaSubsampling>,
 }
 
-/// The chroma subsampling of a HEIF's HEVC stream, from the chroma format in its `hvcC` box.
-fn hevc_chroma_subsampling(data: &[u8]) -> Option<ChromaSubsampling> {
-    let config = data.windows(4).position(|w| w == b"hvcC")? + 4;
-    match data.get(config + 16)? & 0b11 {
-        1 => Some((2, 2)),
-        2 => Some((2, 1)),
-        3 => Some((1, 1)),
-        _ => None,
-    }
-}
-
-fn from_decoder(
-    mut decoder: impl ImageDecoder,
-    chroma_subsampling: Option<ChromaSubsampling>,
-) -> Result<Raster, String> {
+fn from_decoder(mut decoder: impl ImageDecoder) -> Result<Raster, String> {
     let error = |e: image::ImageError| e.to_string();
     let orientation = decoder.orientation().map_err(error)?;
     let icc_profile = decoder.icc_profile().map_err(error)?;
     let mut image = DynamicImage::from_decoder(decoder).map_err(error)?;
     image.apply_orientation(orientation);
-    // Turning the image a quarter turn swaps its horizontal and vertical subsampling.
-    let quarter_turn = matches!(
-        orientation,
-        Orientation::Rotate90
-            | Orientation::Rotate270
-            | Orientation::Rotate90FlipH
-            | Orientation::Rotate270FlipH
-    );
-    Ok(Raster {
-        image,
-        icc_profile,
-        chroma_subsampling: chroma_subsampling
-            .map(|(h, v)| if quarter_turn { (v, h) } else { (h, v) }),
-    })
+    Ok(Raster { image, icc_profile })
 }
 
 fn decode(data: &[u8], format: Format) -> Result<Raster, String> {
     match format {
         Format::Heif => {
             let decoder = HeifDecoder::new(Cursor::new(data)).map_err(|e| e.to_string())?;
-            let mut raster = from_decoder(decoder, hevc_chroma_subsampling(data))?;
+            let mut raster = from_decoder(decoder)?;
             raster.icc_profile = raster.icc_profile.or_else(|| avif::colour_profile(data));
             Ok(raster)
         }
@@ -109,20 +80,15 @@ fn decode(data: &[u8], format: Format) -> Result<Raster, String> {
             Ok(Raster {
                 image: decoded.image,
                 icc_profile: decoded.icc_profile,
-                chroma_subsampling: decoded.chroma_subsampling,
             })
         }
         _ => {
-            let chroma_subsampling = match format {
-                Format::Jpeg => jpeg::chroma_subsampling(data),
-                _ => None,
-            };
             let decoder = ImageReader::new(Cursor::new(data))
                 .with_guessed_format()
                 .map_err(|e| e.to_string())?
                 .into_decoder()
                 .map_err(|e| e.to_string())?;
-            from_decoder(decoder, chroma_subsampling)
+            from_decoder(decoder)
         }
     }
 }
@@ -140,10 +106,63 @@ fn resize(raster: Raster, settings: &Settings) -> Raster {
         return raster;
     }
     Raster {
-        image: raster
-            .image
-            .resize_exact(width, height, FilterType::Lanczos3),
+        image: resample(&raster.image, width, height),
         ..raster
+    }
+}
+
+/// The sRGB transfer curve, which Display P3 shares.
+fn to_linear(value: f32) -> f32 {
+    if value <= 0.040_45 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn from_linear(value: f32) -> f32 {
+    if value <= 0.003_130_8 {
+        value * 12.92
+    } else {
+        1.055f32.mul_add(value.powf(1.0 / 2.4), -0.055)
+    }
+}
+
+/// Resample with Lanczos3 in linear light with premultiplied alpha, so fine detail keeps its
+/// brightness and transparent pixels don't bleed colour into their neighbours. The result has the
+/// source's bit depth and channels.
+fn resample(image: &DynamicImage, width: u32, height: u32) -> DynamicImage {
+    let mut linear = image.to_rgba32f();
+    for pixel in linear.pixels_mut() {
+        let alpha = pixel[3];
+        for channel in &mut pixel.0[..3] {
+            *channel = to_linear(*channel) * alpha;
+        }
+    }
+    let mut resized = imageops::resize(&linear, width, height, FilterType::Lanczos3);
+    for pixel in resized.pixels_mut() {
+        // Lanczos overshoots slightly at sharp edges.
+        let alpha = pixel[3].clamp(0.0, 1.0);
+        for channel in &mut pixel.0[..3] {
+            *channel = if alpha > 0.0 {
+                from_linear((*channel / alpha).clamp(0.0, 1.0))
+            } else {
+                0.0
+            };
+        }
+        pixel[3] = alpha;
+    }
+
+    let resized = DynamicImage::ImageRgba32F(resized);
+    match image.color() {
+        ColorType::L8 => resized.to_luma8().into(),
+        ColorType::La8 => resized.to_luma_alpha8().into(),
+        ColorType::Rgb8 => resized.to_rgb8().into(),
+        ColorType::Rgba8 => resized.to_rgba8().into(),
+        ColorType::L16 => resized.to_luma16().into(),
+        ColorType::La16 => resized.to_luma_alpha16().into(),
+        ColorType::Rgb16 => resized.to_rgb16().into(),
+        _ => resized.to_rgba16().into(),
     }
 }
 
@@ -162,8 +181,7 @@ fn encode_png(raster: &Raster, settings: &Settings) -> Result<Vec<u8>, String> {
     png::optimise(&data, settings.zopfli_iterations)
 }
 
-/// JPEG has no transparency, so translucent pixels are blended onto white. The source's chroma
-/// subsampling is kept, or 4:4:4 used when it had none.
+/// JPEG has no transparency, so translucent pixels are blended onto white.
 fn encode_jpeg(raster: &Raster, settings: &Settings) -> Result<Vec<u8>, String> {
     let rgba = raster.image.to_rgba8();
     let rgb = RgbImage::from_fn(rgba.width(), rgba.height(), |x, y| {
@@ -180,7 +198,6 @@ fn encode_jpeg(raster: &Raster, settings: &Settings) -> Result<Vec<u8>, String> 
         rgb.height(),
         settings.quality,
         raster.icc_profile.as_deref(),
-        raster.chroma_subsampling.unwrap_or((1, 1)),
     )
 }
 

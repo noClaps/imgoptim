@@ -69,8 +69,8 @@ struct ConvertArgs {
     #[argp(option, short = 'H', from_str_fn(parse_dimension))]
     height: Option<NonZeroU32>,
 
-    /// Quality from 1 to 100 for lossy output: JPEG, AVIF and HEIF (default: 85).
-    #[argp(option, short = 'q', default = "85", from_str_fn(parse_quality))]
+    /// Quality from 1 to 100 for lossy output: JPEG, AVIF and HEIF (default: 90).
+    #[argp(option, short = 'q', default = "90", from_str_fn(parse_quality))]
     quality: u8,
 
     /// Zopfli iterations per PNG trial (default: 15). Higher is slower and rarely smaller.
@@ -110,10 +110,6 @@ fn parse_quality(value: &str) -> Result<u8, String> {
         .filter(|quality| (1..=100).contains(quality))
         .ok_or_else(|| "expected a whole number from 1 to 100".to_owned())
 }
-
-/// How much an image's chroma planes are subsampled, as horizontal and vertical divisors: (1, 1) is
-/// 4:4:4, (2, 1) is 4:2:2 and (2, 2) is 4:2:0.
-type ChromaSubsampling = (u8, u8);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Format {

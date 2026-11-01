@@ -5,10 +5,9 @@ use std::{
     ptr, slice,
 };
 
-use crate::ChromaSubsampling;
 use mozjpeg_sys::{
-    J_BOOLEAN_PARAM, J_COLOR_SPACE, jpeg_c_set_bool_param, jpeg_common_struct,
-    jpeg_compress_struct, jpeg_copy_critical_parameters, jpeg_create_compress,
+    J_BOOLEAN_PARAM, J_COLOR_SPACE, J_INT_PARAM, jpeg_c_set_bool_param, jpeg_c_set_int_param,
+    jpeg_common_struct, jpeg_compress_struct, jpeg_copy_critical_parameters, jpeg_create_compress,
     jpeg_create_decompress, jpeg_decompress_struct, jpeg_destroy_compress, jpeg_destroy_decompress,
     jpeg_error_mgr, jpeg_finish_compress, jpeg_finish_decompress, jpeg_mem_dest, jpeg_mem_src,
     jpeg_read_coefficients, jpeg_read_header, jpeg_save_markers, jpeg_set_defaults,
@@ -225,55 +224,19 @@ fn recompress(data: &[u8], progressive_modes: &[bool]) -> Result<Vec<u8>, String
     }
 }
 
-/// The chroma subsampling of a colour JPEG, read from its frame header.
-pub fn chroma_subsampling(data: &[u8]) -> Option<ChromaSubsampling> {
-    let mut position = 2;
-    while position + 4 <= data.len() {
-        if data[position] != 0xFF {
-            return None;
-        }
-        let marker = data[position + 1];
-        let length = usize::from(u16::from_be_bytes([data[position + 2], data[position + 3]]));
-        // Start of frame markers, apart from the DHT, JPG and DAC markers that share the range.
-        if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
-            // Precision, height, width and component count, then three bytes per component.
-            let frame = data.get(position + 4..position + 2 + length)?;
-            if frame.get(5) != Some(&3) {
-                return None;
-            }
-            let sampling = |component: usize| {
-                let factors = frame.get(6 + component * 3 + 1)?;
-                Some((factors >> 4, factors & 0x0F))
-            };
-            let ((luma_h, luma_v), (chroma_h, chroma_v)) = (sampling(0)?, sampling(1)?);
-            return (chroma_h > 0 && chroma_v > 0).then(|| (luma_h / chroma_h, luma_v / chroma_v));
-        }
-        position += 2 + length;
-    }
-    None
-}
-
 /// The most ICC profile data that fits in one APP2 marker, after its signature and sequence bytes.
 const ICC_CHUNK_SIZE: usize = 65519;
 
-/// Encode 8-bit RGB pixels with mozjpeg's maximum compression profile: progressive scans with
-/// optimised scan order, trellis quantisation and optimised Huffman tables.
+/// Encode 8-bit RGB pixels with mozjpeg's maximum compression profile (progressive scans with
+/// optimised scan order, trellis quantisation and optimised Huffman tables) and the standard
+/// quantisation tables, without chroma subsampling.
 pub fn encode(
     rgb: &[u8],
     width: u32,
     height: u32,
     quality: u8,
     icc_profile: Option<&[u8]>,
-    chroma_subsampling: ChromaSubsampling,
 ) -> Result<Vec<u8>, String> {
-    // libjpeg allows sampling factors from 1 to 4.
-    let (horizontal, vertical) = chroma_subsampling;
-    if !(1..=4).contains(&horizontal) || !(1..=4).contains(&vertical) {
-        return Err(format!(
-            "unsupported chroma subsampling {horizontal}×{vertical}"
-        ));
-    }
-
     // Each APP2 marker numbers itself and the total in a byte.
     let icc_chunks = icc_profile.map_or(0, |icc| icc.chunks(ICC_CHUNK_SIZE).len());
     let icc_chunk_count =
@@ -292,15 +255,15 @@ pub fn encode(
             dst.input_components = 3;
             dst.in_color_space = J_COLOR_SPACE::JCS_RGB;
             jpeg_set_defaults(&mut dst);
+            // The standard tables from the JPEG specification, rather than mozjpeg's default,
+            // give smaller files at the same accuracy at high qualities.
+            jpeg_c_set_int_param(&mut dst, J_INT_PARAM::JINT_BASE_QUANT_TBL_IDX, 0);
             jpeg_set_quality(&mut dst, c_int::from(quality), 0);
             dst.optimize_coding = 1;
-            // Luma is sampled relative to the chroma components, which stay at 1×1.
-            let components = slice::from_raw_parts_mut(dst.comp_info, 3);
-            components[0].h_samp_factor = c_int::from(horizontal);
-            components[0].v_samp_factor = c_int::from(vertical);
-            for chroma in &mut components[1..] {
-                chroma.h_samp_factor = 1;
-                chroma.v_samp_factor = 1;
+            // 4:4:4: every component at full resolution, which keeps the most colour detail.
+            for component in slice::from_raw_parts_mut(dst.comp_info, 3) {
+                component.h_samp_factor = 1;
+                component.v_samp_factor = 1;
             }
 
             let mut size: c_ulong = 0;
@@ -331,9 +294,7 @@ pub fn encode(
 
 #[cfg(test)]
 mod tests {
-    use mozjpeg_sys::{
-        J_INT_PARAM, JCOEF, JINT_COMPRESS_PROFILE_VALUE, jpeg_c_set_int_param, jpeg_marker,
-    };
+    use mozjpeg_sys::{JCOEF, JINT_COMPRESS_PROFILE_VALUE, jpeg_marker};
 
     use super::*;
 

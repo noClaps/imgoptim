@@ -1,18 +1,19 @@
 use avif_decode::{Decoder, Image};
-use avif_parse::AvifData;
-use image::{DynamicImage, ImageBuffer, RgbaImage};
+use avif_serialize::{Aviffy, constants};
+use image::{DynamicImage, ImageBuffer, Rgba};
 use moxcms::{
     CicpColorPrimaries, CicpProfile, ColorProfile, Layout, MatrixCoefficients,
     TransferCharacteristics, TransformOptions,
 };
-use ravif::{AlphaColorMode, BitDepth, Encoder, Img, RGBA8};
-
-use crate::ChromaSubsampling;
+use rav1e::prelude::{
+    ChromaSampling, ColorDescription, ColorPrimaries, Config, Context, EncoderConfig,
+    EncoderStatus, MatrixCoefficients as Rav1eMatrixCoefficients, PixelRange, SpeedSettings,
+    TransferCharacteristics as Rav1eTransferCharacteristics,
+};
 
 pub struct Decoded {
     pub image: DynamicImage,
     pub icc_profile: Option<Vec<u8>>,
-    pub chroma_subsampling: Option<ChromaSubsampling>,
 }
 
 /// The colour space from the first `colr` box of an AVIF or HEIF file, as an ICC profile, or `None`
@@ -72,28 +73,87 @@ pub fn decode(data: &[u8]) -> Result<Decoded, String> {
         Image::Gray16(image) => convert!(image, ImageLuma16, |p| [p.value()]),
     };
 
-    let chroma_subsampling = AvifData::from_reader(&mut &data[..])
-        .and_then(|avif| avif.primary_item_metadata())
-        .ok()
-        .filter(|metadata| !metadata.monochrome)
-        .map(|metadata| {
-            let (x, y) = metadata.chroma_subsampling;
-            (1 + u8::from(x), 1 + u8::from(y))
-        });
     Ok(Decoded {
         image,
         icc_profile: colour_profile(data),
-        chroma_subsampling,
     })
 }
 
-/// Convert pixels in the colour space of `icc_profile` to sRGB.
-fn to_srgb(rgba: &mut RgbaImage, icc_profile: &[u8]) -> Result<(), String> {
+/// A colour space AVIF can describe with CICP codes, which is the only way it's widely supported.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ColourSpace {
+    Srgb,
+    DisplayP3,
+}
+
+impl ColourSpace {
+    fn profile(self) -> ColorProfile {
+        match self {
+            Self::Srgb => ColorProfile::new_srgb(),
+            Self::DisplayP3 => ColorProfile::new_display_p3(),
+        }
+    }
+
+    fn rav1e_primaries(self) -> ColorPrimaries {
+        match self {
+            Self::Srgb => ColorPrimaries::BT709,
+            Self::DisplayP3 => ColorPrimaries::SMPTE432,
+        }
+    }
+
+    fn avif_primaries(self) -> constants::ColorPrimaries {
+        match self {
+            Self::Srgb => constants::ColorPrimaries::Bt709,
+            Self::DisplayP3 => constants::ColorPrimaries::DisplayP3,
+        }
+    }
+}
+
+/// Whether converting from `source` to `target` leaves colours unchanged, i.e. they're the same
+/// colour space even if their profiles differ byte for byte.
+fn same_colour_space(source: &ColorProfile, target: &ColorProfile) -> bool {
+    let Ok(transform) = source.create_transform_8bit(
+        Layout::Rgb,
+        target,
+        Layout::Rgb,
+        TransformOptions::default(),
+    ) else {
+        return false;
+    };
+    let samples: Vec<u8> = (0..=255u8)
+        .step_by(51)
+        .flat_map(|r| {
+            (0..=255u8)
+                .step_by(51)
+                .flat_map(move |g| (0..=255u8).step_by(51).flat_map(move |b| [r, g, b]))
+        })
+        .collect();
+    let mut converted = vec![0; samples.len()];
+    transform.transform(&samples, &mut converted).is_ok()
+        && samples
+            .iter()
+            .zip(&converted)
+            .all(|(a, b)| a.abs_diff(*b) <= 1)
+}
+
+/// Keep the source's colour space when AVIF can describe it, otherwise convert to Display P3.
+fn colour_space(
+    rgba: &mut ImageBuffer<Rgba<u16>, Vec<u16>>,
+    icc_profile: Option<&[u8]>,
+) -> Result<ColourSpace, String> {
+    let Some(icc_profile) = icc_profile else {
+        return Ok(ColourSpace::Srgb);
+    };
     let source = ColorProfile::new_from_slice(icc_profile).map_err(|e| e.to_string())?;
+    for space in [ColourSpace::Srgb, ColourSpace::DisplayP3] {
+        if same_colour_space(&source, &space.profile()) {
+            return Ok(space);
+        }
+    }
     let transform = source
-        .create_transform_8bit(
+        .create_transform_16bit(
             Layout::Rgba,
-            &ColorProfile::new_srgb(),
+            &ColourSpace::DisplayP3.profile(),
             Layout::Rgba,
             TransformOptions::default(),
         )
@@ -103,43 +163,161 @@ fn to_srgb(rgba: &mut RgbaImage, icc_profile: &[u8]) -> Result<(), String> {
         .transform(rgba.as_raw(), &mut converted)
         .map_err(|e| e.to_string())?;
     rgba.copy_from_slice(&converted);
-    Ok(())
+    Ok(ColourSpace::DisplayP3)
 }
 
-/// Encode with rav1e at its slowest, most thorough speed, in 10 bits, which compresses better
-/// than 8 even for 8-bit sources. Fully transparent pixels have their colour cleared. ravif always
-/// stores 4:4:4 chroma and can only label images as sRGB, so other colour spaces are converted to
-/// it.
+/// rav1e's slowest, most thorough speed preset.
+const SPEED: u8 = 0;
+const BIT_DEPTH: usize = 10;
+const MAX_SAMPLE: f32 = 1023.0;
+/// The chroma value for no colour, half way through the 10-bit range.
+const NEUTRAL_CHROMA: f32 = 512.0;
+
+/// ravif's mapping from a 1–100 quality to a quantiser, where 0 is lossless.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the result is between 0 and 255"
+)]
+fn quantizer(quality: u8) -> usize {
+    let q = f32::from(quality) / 100.0;
+    let x = if q >= 0.82 {
+        (1.0 - q) * 2.6
+    } else if q > 0.25 {
+        q.mul_add(-0.5, 1.0 - 0.125)
+    } else {
+        1.0 - q
+    };
+    (x * 255.0).round() as usize
+}
+
+/// Encode planes of 10-bit samples as a single AV1 key frame.
+fn encode_av1(
+    width: usize,
+    height: usize,
+    planes: &[Vec<u16>],
+    chroma_sampling: ChromaSampling,
+    color_description: Option<ColorDescription>,
+    quantizer: usize,
+) -> Result<Vec<u8>, String> {
+    let config = Config::new().with_encoder_config(EncoderConfig {
+        width,
+        height,
+        bit_depth: BIT_DEPTH,
+        chroma_sampling,
+        pixel_range: PixelRange::Full,
+        color_description,
+        still_picture: true,
+        quantizer,
+        min_quantizer: u8::try_from(quantizer).expect("quantisers are at most 255"),
+        speed_settings: SpeedSettings::from_preset(SPEED),
+        ..EncoderConfig::default()
+    });
+    let mut context: Context<u16> = config.new_context().map_err(|e| e.to_string())?;
+    let mut frame = context.new_frame();
+    for (plane, samples) in frame.planes.iter_mut().zip(planes) {
+        #[expect(
+            clippy::default_trait_access,
+            reason = "rav1e doesn't export the plane offset type"
+        )]
+        let mut slice = plane.mut_slice(Default::default());
+        for (row, samples) in slice
+            .rows_iter_mut()
+            .zip(samples.chunks_exact(width))
+            .take(height)
+        {
+            row[..width].copy_from_slice(samples);
+        }
+    }
+    context.send_frame(frame).map_err(|e| e.to_string())?;
+    context.flush();
+
+    let mut data = Vec::new();
+    loop {
+        match context.receive_packet() {
+            Ok(mut packet) => data.append(&mut packet.data),
+            Err(EncoderStatus::Encoded) => {}
+            Err(EncoderStatus::LimitReached) => return Ok(data),
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+}
+
+/// Encode with rav1e at its slowest speed, as 10-bit 4:4:4 BT.601 YCbCr, which keeps the most
+/// colour detail. Transparency is stored losslessly. The colour space is kept when AVIF can
+/// describe it, and converted to Display P3 otherwise.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "samples are clamped to the 10-bit range before conversion"
+)]
 pub fn encode(
     image: &DynamicImage,
     icc_profile: Option<&[u8]>,
     quality: u8,
 ) -> Result<Vec<u8>, String> {
-    let mut rgba = image.to_rgba8();
-    if let Some(icc_profile) = icc_profile {
-        to_srgb(&mut rgba, icc_profile)?;
+    let mut rgba = image.to_rgba16();
+    let colour_space = colour_space(&mut rgba, icc_profile)?;
+    let (width, height) = (rgba.width() as usize, rgba.height() as usize);
+
+    let sample = |value: f32| value.round().clamp(0.0, MAX_SAMPLE) as u16;
+    let ten_bit = |value: u16| f32::from(value) * MAX_SAMPLE / f32::from(u16::MAX);
+    let pixels = width * height;
+    let (mut luma, mut blue_chroma, mut red_chroma, mut alpha) = (
+        Vec::with_capacity(pixels),
+        Vec::with_capacity(pixels),
+        Vec::with_capacity(pixels),
+        Vec::with_capacity(pixels),
+    );
+    for pixel in rgba.pixels() {
+        let [red, green, blue, opacity] = pixel.0.map(ten_bit);
+        let y = 0.299f32.mul_add(red, 0.587f32.mul_add(green, 0.114 * blue));
+        luma.push(sample(y));
+        blue_chroma.push(sample((blue - y) / 1.772 + NEUTRAL_CHROMA));
+        red_chroma.push(sample((red - y) / 1.402 + NEUTRAL_CHROMA));
+        alpha.push(sample(opacity));
     }
-    let pixels: Vec<RGBA8> = rgba
-        .pixels()
-        .map(|pixel| RGBA8::new(pixel[0], pixel[1], pixel[2], pixel[3]))
-        .collect();
-    Encoder::new()
-        .with_quality(f32::from(quality))
-        .with_alpha_quality(f32::from(quality))
-        .with_speed(1)
-        .with_bit_depth(BitDepth::Ten)
-        .with_alpha_color_mode(AlphaColorMode::UnassociatedClean)
-        .encode_rgba(Img::new(
-            &pixels,
-            rgba.width() as usize,
-            rgba.height() as usize,
-        ))
-        .map(|encoded| encoded.avif_file)
-        .map_err(|e| e.to_string())
+    let planes = [luma, blue_chroma, red_chroma];
+
+    let colour = encode_av1(
+        width,
+        height,
+        &planes,
+        ChromaSampling::Cs444,
+        Some(ColorDescription {
+            color_primaries: colour_space.rav1e_primaries(),
+            transfer_characteristics: Rav1eTransferCharacteristics::SRGB,
+            matrix_coefficients: Rav1eMatrixCoefficients::BT601,
+        }),
+        quantizer(quality),
+    )?;
+    let alpha = if alpha.iter().all(|&a| a == sample(MAX_SAMPLE)) {
+        None
+    } else {
+        Some(encode_av1(
+            width,
+            height,
+            &[alpha],
+            ChromaSampling::Cs400,
+            None,
+            0,
+        )?)
+    };
+
+    let size =
+        |pixels: usize| u32::try_from(pixels).expect("AV1 frames are under 65536 pixels a side");
+    Ok(Aviffy::new()
+        .set_color_primaries(colour_space.avif_primaries())
+        .set_transfer_characteristics(constants::TransferCharacteristics::Srgb)
+        .set_matrix_coefficients(constants::MatrixCoefficients::Bt601)
+        .set_full_color_range(true)
+        .to_vec(&colour, alpha.as_deref(), size(width), size(height), 10))
 }
 
 #[cfg(test)]
 mod tests {
+    use image::RgbaImage;
+
     use super::*;
 
     #[test]
@@ -159,24 +337,38 @@ mod tests {
         let decoded = decode(&encode(&image, None, 80).unwrap()).unwrap();
         assert_eq!((decoded.image.width(), decoded.image.height()), (40, 24));
         assert!(decoded.image.color().has_alpha());
-        // ravif writes 4:4:4 and labels it sRGB.
-        assert_eq!(decoded.chroma_subsampling, Some((1, 1)));
+        // Untagged sources are stored as sRGB.
         assert_eq!(decoded.icc_profile, None);
     }
 
-    #[test]
-    fn converts_wide_gamut_to_srgb() {
-        // A Display P3 orange is more saturated than the same numbers in sRGB, so its red rises
-        // and its blue falls once converted.
-        let image = DynamicImage::ImageRgba8(RgbaImage::from_pixel(
+    fn orange() -> DynamicImage {
+        DynamicImage::ImageRgba8(RgbaImage::from_pixel(
             16,
             16,
             image::Rgba([200, 100, 50, 255]),
-        ));
+        ))
+    }
+
+    #[test]
+    fn keeps_display_p3() {
         let p3 = ColorProfile::new_display_p3().encode().unwrap();
-        let decoded = decode(&encode(&image, Some(&p3), 100).unwrap()).unwrap();
-        let [r, _, b, _] = decoded.image.to_rgba8().get_pixel(8, 8).0;
-        assert!(r > 205 && b < 45, "{r} {b}");
+        let decoded = decode(&encode(&orange(), Some(&p3), 100).unwrap()).unwrap();
+        let profile = ColorProfile::new_from_slice(&decoded.icc_profile.unwrap()).unwrap();
+        assert!(same_colour_space(&profile, &ColorProfile::new_display_p3()));
+        let [r, g, b, _] = decoded.image.to_rgba8().get_pixel(8, 8).0;
+        assert!(r.abs_diff(200) <= 2 && g.abs_diff(100) <= 2 && b.abs_diff(50) <= 2);
+    }
+
+    #[test]
+    fn converts_other_colour_spaces_to_display_p3() {
+        // BT.2020's gamut is wider than Display P3's, so the same numbers become a more
+        // saturated Display P3 colour.
+        let bt2020 = ColorProfile::new_bt2020().encode().unwrap();
+        let decoded = decode(&encode(&orange(), Some(&bt2020), 100).unwrap()).unwrap();
+        let profile = ColorProfile::new_from_slice(&decoded.icc_profile.unwrap()).unwrap();
+        assert!(same_colour_space(&profile, &ColorProfile::new_display_p3()));
+        let [r, ..] = decoded.image.to_rgba8().get_pixel(8, 8).0;
+        assert!(r > 215, "{r}");
     }
 
     #[test]

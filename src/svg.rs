@@ -4,18 +4,49 @@ use oxvg_ast::{
     visitor::Info,
 };
 use oxvg_optimiser::{
-    CleanupListOfValues, ConvertOneStopGradients, Jobs, RemoveOffCanvasPaths, RemoveXlink,
-    ReusePaths,
+    CleanupListOfValues, CleanupNumericValues, ConvertOneStopGradients, ConvertPathData,
+    ConvertShapeToPath, ConvertTransform, Jobs, RemoveOffCanvasPaths, RemoveXlink, ReusePaths,
 };
 
 /// The most passes to run before giving up on further gains, matching SVGO's multipass limit.
 const MAX_PASSES: usize = 10;
 
+/// Decimal places numbers are rounded to: the most the optimiser allows. SVGO's default of 3 can
+/// visibly shift edges, while 5 is finer than the 32-bit floats renderers use for coordinates in
+/// the thousands.
+const PRECISION: u8 = 5;
+
 /// The default SVGO preset plus the opt-in plugins that shrink output without changing how the
-/// image renders.
+/// image renders, with numbers rounded to [`PRECISION`] and no approximations of curves.
 fn jobs() -> Jobs {
+    let precision = i32::from(PRECISION);
+    let mut path_data = ConvertPathData {
+        // Replaces curves with circular arcs that only approximate them.
+        arc_curves: false,
+        smart_arc_rounding: false,
+        ..ConvertPathData::default()
+    };
+    path_data.tolerance.precision = precision;
+    path_data.tolerance.positional = 10f64.powi(-precision);
     Jobs {
-        cleanup_list_of_values: Some(CleanupListOfValues::default()),
+        cleanup_numeric_values: Some(CleanupNumericValues {
+            float_precision: PRECISION,
+            ..CleanupNumericValues::default()
+        }),
+        cleanup_list_of_values: Some(CleanupListOfValues {
+            float_precision: PRECISION,
+            ..CleanupListOfValues::default()
+        }),
+        convert_shape_to_path: Some(ConvertShapeToPath {
+            float_precision: precision,
+            ..ConvertShapeToPath::default()
+        }),
+        convert_transform: Some(ConvertTransform {
+            float_precision: precision,
+            transform_precision: precision + 2,
+            ..ConvertTransform::default()
+        }),
+        convert_path_data: Some(path_data),
         convert_one_stop_gradients: Some(ConvertOneStopGradients::default()),
         remove_off_canvas_paths: Some(RemoveOffCanvasPaths::default()),
         reuse_paths: Some(ReusePaths::default()),
