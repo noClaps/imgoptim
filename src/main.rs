@@ -3,7 +3,9 @@ mod png;
 mod svg;
 
 use std::{
-    fs::{read, write},
+    ffi::OsStr,
+    fs::{read, read_dir, write},
+    io,
     num::NonZeroU64,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -27,9 +29,35 @@ struct Args {
     )]
     zopfli_iterations: NonZeroU64,
 
-    /// Images to optimise.
+    /// Optimise every PNG, JPEG and SVG in the given directories and their subdirectories.
+    #[argp(switch, short = 'r')]
+    recursive: bool,
+
+    /// Images, or directories with -r, to optimise.
     #[argp(positional)]
     paths: Vec<PathBuf>,
+}
+
+const EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "svg"];
+
+/// Collect every file under `dir` with a supported extension, in a stable order. Symlinked
+/// directories aren't followed, so links can't cause loops.
+fn find_images(dir: &Path, images: &mut Vec<PathBuf>) -> io::Result<()> {
+    let mut entries = read_dir(dir)?.collect::<io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            find_images(&path, images)?;
+        } else if path
+            .extension()
+            .and_then(OsStr::to_str)
+            .is_some_and(|ext| EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)))
+        {
+            images.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn parse_iterations(value: &str) -> Result<NonZeroU64, String> {
@@ -94,13 +122,29 @@ fn main() -> ExitCode {
         eprintln!("No images given. Run with --help for usage.");
         return ExitCode::FAILURE;
     }
-    if args.output.is_some() && args.paths.len() > 1 {
-        eprintln!("--output can only be used with a single input.");
+    if args.output.is_some() && (args.paths.len() > 1 || args.paths[0].is_dir()) {
+        eprintln!("--output can only be used with a single file.");
         return ExitCode::FAILURE;
     }
 
     let mut status = ExitCode::SUCCESS;
+    let mut images = Vec::new();
     for path in &args.paths {
+        if !path.is_dir() {
+            images.push(path.clone());
+        } else if !args.recursive {
+            eprintln!(
+                "{}: is a directory (use -r to optimise its images)",
+                path.display()
+            );
+            status = ExitCode::FAILURE;
+        } else if let Err(e) = find_images(path, &mut images) {
+            eprintln!("{}: {e}", path.display());
+            status = ExitCode::FAILURE;
+        }
+    }
+
+    for path in &images {
         let output = args.output.as_deref().unwrap_or(path);
         if let Err(e) = optimise(path, output, args.zopfli_iterations) {
             eprintln!("{}: {e}", path.display());
