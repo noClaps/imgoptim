@@ -1,3 +1,5 @@
+use std::{cmp::Reverse, num::NonZeroU32, ops::Range};
+
 use oxvg_ast::{
     parse::roxmltree::{ParsingOptions, parse_with_options},
     serialize::Node as _,
@@ -7,6 +9,9 @@ use oxvg_optimiser::{
     CleanupListOfValues, ConvertOneStopGradients, Jobs, RemoveOffCanvasPaths, RemoveXlink,
     ReusePaths,
 };
+use resvg::usvg::{self, Tree};
+
+use crate::convert::target_size;
 
 /// The most passes to run before giving up on further gains, matching SVGO's multipass limit.
 const MAX_PASSES: usize = 10;
@@ -54,9 +59,88 @@ pub fn optimise(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(best.into_bytes())
 }
 
+/// Set an SVG's rendered size without touching its content. A `viewBox` matching the original size
+/// is added if there isn't one, so the drawing scales with the new size.
+pub fn resize(
+    data: &[u8],
+    width: Option<NonZeroU32>,
+    height: Option<NonZeroU32>,
+) -> Result<Vec<u8>, String> {
+    if width.is_none() && height.is_none() {
+        return Ok(data.to_vec());
+    }
+    let source = std::str::from_utf8(data).map_err(|e| format!("SVG is not UTF-8: {e}"))?;
+    let original = Tree::from_str(source, &usvg::Options::default())
+        .map_err(|e| e.to_string())?
+        .size();
+    let (new_width, new_height) = target_size(
+        (f64::from(original.width()), f64::from(original.height())),
+        width,
+        height,
+    );
+
+    let options = roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..roxmltree::ParsingOptions::default()
+    };
+    let document =
+        roxmltree::Document::parse_with_options(source, options).map_err(|e| e.to_string())?;
+    let root = document.root_element();
+
+    // Replacements as (byte range, new text), applied back to front so earlier ranges stay valid.
+    let mut edits: Vec<(Range<usize>, String)> = root
+        .attributes()
+        .filter(|a| a.namespace().is_none() && matches!(a.name(), "width" | "height"))
+        .map(|a| (a.range(), String::new()))
+        .collect();
+    let tag_start = root.range().start + 1;
+    let name_end = tag_start
+        + source[tag_start..]
+            .find(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>')
+            .ok_or("unterminated root element")?;
+    let mut attributes = format!(r#" width="{new_width}" height="{new_height}""#);
+    if root.attribute("viewBox").is_none() {
+        attributes += &format!(
+            r#" viewBox="0 0 {} {}""#,
+            original.width(),
+            original.height()
+        );
+    }
+    edits.push((name_end..name_end, attributes));
+    edits.sort_by_key(|(range, _)| Reverse(range.start));
+
+    let mut resized = source.to_owned();
+    for (range, text) in edits {
+        resized.replace_range(range, &text);
+    }
+    Ok(resized.into_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resizes_keeping_aspect_ratio() {
+        let original = br#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><rect width="200" height="100"/></svg>"#;
+        let resized =
+            String::from_utf8(resize(original, NonZeroU32::new(50), None).unwrap()).unwrap();
+        assert_eq!(
+            resized,
+            r#"<svg width="50" height="25" viewBox="0 0 200 100" xmlns="http://www.w3.org/2000/svg"  ><rect width="200" height="100"/></svg>"#
+        );
+    }
+
+    #[test]
+    fn resize_keeps_existing_view_box() {
+        let original = br#"<svg viewBox="0 0 10 20" xmlns="http://www.w3.org/2000/svg"/>"#;
+        let resized =
+            String::from_utf8(resize(original, None, NonZeroU32::new(40)).unwrap()).unwrap();
+        assert_eq!(
+            resized,
+            r#"<svg width="20" height="40" viewBox="0 0 10 20" xmlns="http://www.w3.org/2000/svg"/>"#
+        );
+    }
 
     #[test]
     fn minifies() {

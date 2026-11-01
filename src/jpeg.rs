@@ -28,6 +28,36 @@ unsafe extern "C-unwind" fn error_exit(cinfo: &mut jpeg_common_struct) {
 
 unsafe extern "C-unwind" fn silence(_: &mut jpeg_common_struct) {}
 
+/// An error manager that unwinds instead of exiting the process, for use with [`catch`].
+unsafe fn error_manager() -> Box<jpeg_error_mgr> {
+    unsafe {
+        let mut err: Box<jpeg_error_mgr> = Box::new(mem::zeroed());
+        jpeg_std_error(&mut err);
+        err.error_exit = Some(error_exit);
+        err.output_message = Some(silence);
+        err
+    }
+}
+
+/// Run libjpeg calls, turning errors raised through [`error_manager`] into `Err`.
+fn catch<T>(f: impl FnOnce() -> T) -> Result<T, String> {
+    panic::catch_unwind(AssertUnwindSafe(f)).map_err(|e| {
+        e.downcast::<String>()
+            .map(|message| *message)
+            .unwrap_or_else(|_| "unknown JPEG error".to_owned())
+    })
+}
+
+/// Copy out and free a buffer filled by `jpeg_mem_dest`.
+unsafe fn take_output(out: &mut *mut u8, size: c_ulong) -> Vec<u8> {
+    unsafe {
+        let result = slice::from_raw_parts(*out, size as usize).to_vec();
+        libc::free(out.cast());
+        *out = ptr::null_mut();
+        result
+    }
+}
+
 /// Read the EXIF orientation (1–8) out of an APP1 payload, if there is one.
 fn exif_orientation(exif: &[u8]) -> Option<u16> {
     let tiff = exif.strip_prefix(EXIF_SIGNATURE)?;
@@ -124,11 +154,7 @@ unsafe fn transcode(
             jpeg_write_marker(dst, *code, data.as_ptr(), data.len() as _);
         }
         jpeg_finish_compress(dst);
-
-        let result = slice::from_raw_parts(*out, size as usize).to_vec();
-        libc::free(out.cast());
-        *out = ptr::null_mut();
-        result
+        take_output(out, size)
     }
 }
 
@@ -137,18 +163,14 @@ unsafe fn transcode(
 /// `jpegtran -copy none -optimize`, keeping the colour profile and orientation.
 pub fn optimise(data: &[u8]) -> Result<Vec<u8>, String> {
     unsafe {
-        let mut err: Box<jpeg_error_mgr> = Box::new(mem::zeroed());
-        jpeg_std_error(&mut err);
-        err.error_exit = Some(error_exit);
-        err.output_message = Some(silence);
-
+        let mut err = error_manager();
         let mut src: Box<jpeg_decompress_struct> = Box::new(mem::zeroed());
         let mut dst: Box<jpeg_compress_struct> = Box::new(mem::zeroed());
         src.common.err = &mut *err;
         dst.common.err = &mut *err;
         let mut out: *mut u8 = ptr::null_mut();
 
-        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        let result = catch(|| {
             jpeg_create_decompress(&mut *src);
             jpeg_create_compress(&mut *dst);
 
@@ -168,19 +190,68 @@ pub fn optimise(data: &[u8]) -> Result<Vec<u8>, String> {
             } else {
                 progressive
             }
-        }));
+        });
 
         if !out.is_null() {
             libc::free(out.cast());
         }
         jpeg_destroy_compress(&mut dst);
         jpeg_destroy_decompress(&mut src);
+        result
+    }
+}
 
-        result.map_err(|e| {
-            e.downcast::<String>()
-                .map(|message| *message)
-                .unwrap_or_else(|_| "unknown JPEG error".to_owned())
-        })
+/// The most ICC profile data that fits in one APP2 marker, after its signature and sequence bytes.
+const ICC_CHUNK_SIZE: usize = 65519;
+
+/// Encode 8-bit RGB pixels with mozjpeg's maximum compression profile: progressive scans with
+/// optimised scan order, trellis quantisation and optimised Huffman tables.
+pub fn encode(
+    rgb: &[u8],
+    width: u32,
+    height: u32,
+    quality: u8,
+    icc_profile: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
+    unsafe {
+        let mut err = error_manager();
+        let mut dst: Box<jpeg_compress_struct> = Box::new(mem::zeroed());
+        dst.common.err = &mut *err;
+        let mut out: *mut u8 = ptr::null_mut();
+
+        let result = catch(|| {
+            jpeg_create_compress(&mut *dst);
+            dst.image_width = width;
+            dst.image_height = height;
+            dst.input_components = 3;
+            dst.in_color_space = J_COLOR_SPACE::JCS_RGB;
+            jpeg_set_defaults(&mut dst);
+            jpeg_set_quality(&mut dst, c_int::from(quality), 0);
+            dst.optimize_coding = 1;
+
+            let mut size: c_ulong = 0;
+            jpeg_mem_dest(&mut dst, &mut out, &mut size);
+            jpeg_start_compress(&mut dst, 1);
+            if let Some(icc) = icc_profile {
+                let chunks = icc.chunks(ICC_CHUNK_SIZE);
+                let count = chunks.len() as u8;
+                for (i, chunk) in chunks.enumerate() {
+                    let marker = [ICC_SIGNATURE, &[i as u8 + 1, count], chunk].concat();
+                    jpeg_write_marker(&mut dst, APP2, marker.as_ptr(), marker.len() as _);
+                }
+            }
+            for row in rgb.chunks_exact(width as usize * 3) {
+                jpeg_write_scanlines(&mut dst, &row.as_ptr(), 1);
+            }
+            jpeg_finish_compress(&mut dst);
+            take_output(&mut out, size)
+        });
+
+        if !out.is_null() {
+            libc::free(out.cast());
+        }
+        jpeg_destroy_compress(&mut dst);
+        result
     }
 }
 
@@ -189,7 +260,7 @@ mod tests {
     use super::*;
 
     /// Encode a synthetic RGB image the way plain libjpeg would: baseline, default Huffman tables.
-    fn encode(width: u32, height: u32, markers: &[(c_int, &[u8])]) -> Vec<u8> {
+    fn encode_baseline(width: u32, height: u32, markers: &[(c_int, &[u8])]) -> Vec<u8> {
         let pixels: Vec<u8> = (0..height)
             .flat_map(|y| {
                 (0..width).flat_map(move |x| {
@@ -277,7 +348,7 @@ mod tests {
 
     #[test]
     fn lossless_and_smaller() {
-        let original = encode(257, 123, &[]);
+        let original = encode_baseline(257, 123, &[]);
         let optimised = optimise(&original).unwrap();
         assert!(optimised.len() < original.len());
         assert_eq!(coefficients(&original), coefficients(&optimised));
@@ -289,7 +360,7 @@ mod tests {
         let mut exif = minimal_exif(6);
         exif.extend_from_slice(b"camera serial number");
         let xmp = b"http://ns.adobe.com/xap/1.0/\0<x:xmpmeta/>";
-        let original = encode(
+        let original = encode_baseline(
             64,
             64,
             &[
@@ -312,7 +383,7 @@ mod tests {
 
     #[test]
     fn drops_default_orientation() {
-        let original = encode(32, 32, &[(APP1, &minimal_exif(1))]);
+        let original = encode_baseline(32, 32, &[(APP1, &minimal_exif(1))]);
         let optimised = optimise(&original).unwrap();
         assert!(!optimised.windows(4).any(|w| w == b"Exif"));
     }
@@ -325,7 +396,7 @@ mod tests {
 
     #[test]
     fn rejects_corrupt_input() {
-        let original = encode(32, 32, &[]);
+        let original = encode_baseline(32, 32, &[]);
         assert!(optimise(&original[..original.len() / 4]).is_err());
         assert!(optimise(b"\xFF\xD8\xFFnot a jpeg").is_err());
     }
