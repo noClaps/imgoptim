@@ -56,8 +56,8 @@ struct OptimiseArgs {
     paths: Vec<PathBuf>,
 }
 
-/// Convert an image between PNG, JPEG, SVG, AVIF and HEIF, optionally resizing it.
-/// The output format comes from the output path's extension.
+/// Convert an image between PNG, JPEG, AVIF and HEIF, optionally resizing it. The output format
+/// comes from the output path's extension.
 #[derive(FromArgs)]
 #[argp(subcommand, name = "convert")]
 struct ConvertArgs {
@@ -86,8 +86,7 @@ struct ConvertArgs {
     #[argp(positional)]
     input: PathBuf,
 
-    /// Where to write the converted image, ending in .png, .jpg, .jpeg, .svg, .avif, .heic or
-    /// .heif.
+    /// Where to write the converted image, ending in .png, .jpg, .jpeg, .avif, .heic or .heif.
     #[argp(positional)]
     output: PathBuf,
 }
@@ -111,6 +110,10 @@ fn parse_quality(value: &str) -> Result<u8, String> {
         .filter(|quality| (1..=100).contains(quality))
         .ok_or_else(|| "expected a whole number from 1 to 100".to_owned())
 }
+
+/// How much an image's chroma planes are subsampled, as horizontal and vertical divisors: (1, 1) is
+/// 4:4:4, (2, 1) is 4:2:2 and (2, 2) is 4:2:0.
+type ChromaSubsampling = (u8, u8);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Format {

@@ -5,19 +5,18 @@ use std::{
     path::Path,
 };
 
-use base64::{Engine, engine::general_purpose::STANDARD};
-use image::{
-    DynamicImage, GenericImageView, ImageDecoder, ImageEncoder, ImageReader, Rgb, RgbImage,
-    RgbaImage, codecs::png::PngEncoder, imageops::FilterType,
-};
-use resvg::{tiny_skia, usvg};
-
 use heifer::{
     EncodeOptions,
     image_crate::{HeifDecoder, HeifEncoder},
 };
+use image::{
+    DynamicImage, GenericImageView, ImageDecoder, ImageEncoder, ImageReader, Rgb, RgbImage,
+    codecs::png::PngEncoder, imageops::FilterType, metadata::Orientation,
+};
 
-use crate::{Format, avif, detect, jpeg, png, svg};
+use crate::{ChromaSubsampling, Format, avif, detect, jpeg, png};
+
+const SVG_UNSUPPORTED: &str = "SVGs can only be optimised, not converted";
 
 pub struct Settings {
     pub width: Option<NonZeroU32>,
@@ -33,7 +32,7 @@ pub struct Settings {
     clippy::cast_sign_loss,
     reason = "float-to-integer casts saturate, which is the right behaviour for a pixel size"
 )]
-pub fn target_size(
+fn target_size(
     (original_width, original_height): (f64, f64),
     width: Option<NonZeroU32>,
     height: Option<NonZeroU32>,
@@ -53,78 +52,79 @@ pub fn target_size(
     }
 }
 
-/// Decoded pixels along with the colour profile they're in.
+/// Decoded pixels along with the colour profile they're in and the chroma subsampling they were
+/// stored with, if any.
 struct Raster {
     image: DynamicImage,
     icc_profile: Option<Vec<u8>>,
+    chroma_subsampling: Option<ChromaSubsampling>,
 }
 
-fn from_decoder(mut decoder: impl ImageDecoder) -> Result<Raster, String> {
+/// The chroma subsampling of a HEIF's HEVC stream, from the chroma format in its `hvcC` box.
+fn hevc_chroma_subsampling(data: &[u8]) -> Option<ChromaSubsampling> {
+    let config = data.windows(4).position(|w| w == b"hvcC")? + 4;
+    match data.get(config + 16)? & 0b11 {
+        1 => Some((2, 2)),
+        2 => Some((2, 1)),
+        3 => Some((1, 1)),
+        _ => None,
+    }
+}
+
+fn from_decoder(
+    mut decoder: impl ImageDecoder,
+    chroma_subsampling: Option<ChromaSubsampling>,
+) -> Result<Raster, String> {
     let error = |e: image::ImageError| e.to_string();
     let orientation = decoder.orientation().map_err(error)?;
     let icc_profile = decoder.icc_profile().map_err(error)?;
     let mut image = DynamicImage::from_decoder(decoder).map_err(error)?;
     image.apply_orientation(orientation);
-    Ok(Raster { image, icc_profile })
+    // Turning the image a quarter turn swaps its horizontal and vertical subsampling.
+    let quarter_turn = matches!(
+        orientation,
+        Orientation::Rotate90
+            | Orientation::Rotate270
+            | Orientation::Rotate90FlipH
+            | Orientation::Rotate270FlipH
+    );
+    Ok(Raster {
+        image,
+        icc_profile,
+        chroma_subsampling: chroma_subsampling
+            .map(|(h, v)| if quarter_turn { (v, h) } else { (h, v) }),
+    })
 }
 
 fn decode(data: &[u8], format: Format) -> Result<Raster, String> {
     match format {
         Format::Heif => {
-            from_decoder(HeifDecoder::new(Cursor::new(data)).map_err(|e| e.to_string())?)
+            let decoder = HeifDecoder::new(Cursor::new(data)).map_err(|e| e.to_string())?;
+            let mut raster = from_decoder(decoder, hevc_chroma_subsampling(data))?;
+            raster.icc_profile = raster.icc_profile.or_else(|| avif::colour_profile(data));
+            Ok(raster)
         }
-        Format::Avif => Ok(Raster {
-            image: avif::decode(data)?,
-            icc_profile: None,
-        }),
-        _ => from_decoder(
-            ImageReader::new(Cursor::new(data))
+        Format::Avif => {
+            let decoded = avif::decode(data)?;
+            Ok(Raster {
+                image: decoded.image,
+                icc_profile: decoded.icc_profile,
+                chroma_subsampling: decoded.chroma_subsampling,
+            })
+        }
+        _ => {
+            let chroma_subsampling = match format {
+                Format::Jpeg => jpeg::chroma_subsampling(data),
+                _ => None,
+            };
+            let decoder = ImageReader::new(Cursor::new(data))
                 .with_guessed_format()
                 .map_err(|e| e.to_string())?
                 .into_decoder()
-                .map_err(|e| e.to_string())?,
-        ),
+                .map_err(|e| e.to_string())?;
+            from_decoder(decoder, chroma_subsampling)
+        }
     }
-}
-
-fn rasterise(data: &[u8], path: &Path, settings: &Settings) -> Result<Raster, String> {
-    let mut options = usvg::Options {
-        resources_dir: path.parent().map(Path::to_path_buf),
-        ..usvg::Options::default()
-    };
-    options.fontdb_mut().load_system_fonts();
-    let tree = usvg::Tree::from_data(data, &options).map_err(|e| e.to_string())?;
-
-    let size = tree.size();
-    let (width, height) = target_size(
-        (f64::from(size.width()), f64::from(size.height())),
-        settings.width,
-        settings.height,
-    );
-    let mut pixmap = tiny_skia::Pixmap::new(width, height).ok_or("output size is too large")?;
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "f32 holds every whole number up to 2^24, far beyond any renderable size"
-    )]
-    let transform = tiny_skia::Transform::from_scale(
-        width as f32 / size.width(),
-        height as f32 / size.height(),
-    );
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
-
-    let pixels = pixmap
-        .pixels()
-        .iter()
-        .flat_map(|pixel| {
-            let color = pixel.demultiply();
-            [color.red(), color.green(), color.blue(), color.alpha()]
-        })
-        .collect();
-    let image = RgbaImage::from_raw(width, height, pixels).expect("pixmap matches its size");
-    Ok(Raster {
-        image: DynamicImage::ImageRgba8(image),
-        icc_profile: None,
-    })
 }
 
 fn resize(raster: Raster, settings: &Settings) -> Raster {
@@ -162,7 +162,8 @@ fn encode_png(raster: &Raster, settings: &Settings) -> Result<Vec<u8>, String> {
     png::optimise(&data, settings.zopfli_iterations)
 }
 
-/// JPEG has no transparency, so translucent pixels are blended onto white.
+/// JPEG has no transparency, so translucent pixels are blended onto white. The source's chroma
+/// subsampling is kept, or 4:4:4 used when it had none.
 fn encode_jpeg(raster: &Raster, settings: &Settings) -> Result<Vec<u8>, String> {
     let rgba = raster.image.to_rgba8();
     let rgb = RgbImage::from_fn(rgba.width(), rgba.height(), |x, y| {
@@ -179,6 +180,7 @@ fn encode_jpeg(raster: &Raster, settings: &Settings) -> Result<Vec<u8>, String> 
         rgb.height(),
         settings.quality,
         raster.icc_profile.as_deref(),
+        raster.chroma_subsampling.unwrap_or((1, 1)),
     )
 }
 
@@ -201,33 +203,16 @@ fn encode_heif(raster: &Raster, settings: &Settings) -> Result<Vec<u8>, String> 
     Ok(data)
 }
 
-/// Wrap a raster image in an SVG. JPEG sources without transparency stay JPEG inside, everything
-/// else is embedded as PNG.
-fn encode_svg(raster: &Raster, from: Format, settings: &Settings) -> Result<Vec<u8>, String> {
-    let (mime, data) = if from == Format::Jpeg && !raster.image.color().has_alpha() {
-        ("image/jpeg", encode_jpeg(raster, settings)?)
-    } else {
-        ("image/png", encode_png(raster, settings)?)
-    };
-    let (width, height) = raster.image.dimensions();
-    Ok(format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><image width="{width}" height="{height}" href="data:{mime};base64,{}"/></svg>"#,
-        STANDARD.encode(data)
-    )
-    .into_bytes())
-}
-
-fn encode(
-    raster: &Raster,
-    from: Format,
-    to: Format,
-    settings: &Settings,
-) -> Result<Vec<u8>, String> {
+fn encode(raster: &Raster, to: Format, settings: &Settings) -> Result<Vec<u8>, String> {
     match to {
         Format::Png => encode_png(raster, settings),
-        Format::Svg => encode_svg(raster, from, settings),
+        Format::Svg => Err(SVG_UNSUPPORTED.to_owned()),
         Format::Jpeg => encode_jpeg(raster, settings),
-        Format::Avif => avif::encode(&raster.image, settings.quality),
+        Format::Avif => avif::encode(
+            &raster.image,
+            raster.icc_profile.as_deref(),
+            settings.quality,
+        ),
         Format::Heif => encode_heif(raster, settings),
     }
 }
@@ -238,15 +223,11 @@ pub fn convert(input: &Path, output: &Path, settings: &Settings) -> Result<(), S
     let data = read(input).map_err(|e| e.to_string())?;
     let from = detect(input, &data).ok_or("not a supported image format")?;
     let to = Format::from_extension(output)
-        .ok_or("the output path must end in .png, .jpg, .jpeg, .svg, .avif, .heic or .heif")?;
-
-    let result = match (from, to) {
-        (Format::Svg, Format::Svg) => {
-            svg::optimise(&svg::resize(&data, settings.width, settings.height)?)?
-        }
-        (Format::Svg, _) => encode(&rasterise(&data, input, settings)?, from, to, settings)?,
-        _ => encode(&resize(decode(&data, from)?, settings), from, to, settings)?,
-    };
+        .ok_or("the output path must end in .png, .jpg, .jpeg, .avif, .heic or .heif")?;
+    if from == Format::Svg {
+        return Err(SVG_UNSUPPORTED.to_owned());
+    }
+    let result = encode(&resize(decode(&data, from)?, settings), to, settings)?;
 
     if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
         create_dir_all(parent).map_err(|e| e.to_string())?;

@@ -5,6 +5,7 @@ use std::{
     ptr, slice,
 };
 
+use crate::ChromaSubsampling;
 use mozjpeg_sys::{
     J_BOOLEAN_PARAM, J_COLOR_SPACE, jpeg_c_set_bool_param, jpeg_common_struct,
     jpeg_compress_struct, jpeg_copy_critical_parameters, jpeg_create_compress,
@@ -224,6 +225,34 @@ fn recompress(data: &[u8], progressive_modes: &[bool]) -> Result<Vec<u8>, String
     }
 }
 
+/// The chroma subsampling of a colour JPEG, read from its frame header.
+pub fn chroma_subsampling(data: &[u8]) -> Option<ChromaSubsampling> {
+    let mut position = 2;
+    while position + 4 <= data.len() {
+        if data[position] != 0xFF {
+            return None;
+        }
+        let marker = data[position + 1];
+        let length = usize::from(u16::from_be_bytes([data[position + 2], data[position + 3]]));
+        // Start of frame markers, apart from the DHT, JPG and DAC markers that share the range.
+        if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
+            // Precision, height, width and component count, then three bytes per component.
+            let frame = data.get(position + 4..position + 2 + length)?;
+            if frame.get(5) != Some(&3) {
+                return None;
+            }
+            let sampling = |component: usize| {
+                let factors = frame.get(6 + component * 3 + 1)?;
+                Some((factors >> 4, factors & 0x0F))
+            };
+            let ((luma_h, luma_v), (chroma_h, chroma_v)) = (sampling(0)?, sampling(1)?);
+            return (chroma_h > 0 && chroma_v > 0).then(|| (luma_h / chroma_h, luma_v / chroma_v));
+        }
+        position += 2 + length;
+    }
+    None
+}
+
 /// The most ICC profile data that fits in one APP2 marker, after its signature and sequence bytes.
 const ICC_CHUNK_SIZE: usize = 65519;
 
@@ -235,7 +264,16 @@ pub fn encode(
     height: u32,
     quality: u8,
     icc_profile: Option<&[u8]>,
+    chroma_subsampling: ChromaSubsampling,
 ) -> Result<Vec<u8>, String> {
+    // libjpeg allows sampling factors from 1 to 4.
+    let (horizontal, vertical) = chroma_subsampling;
+    if !(1..=4).contains(&horizontal) || !(1..=4).contains(&vertical) {
+        return Err(format!(
+            "unsupported chroma subsampling {horizontal}×{vertical}"
+        ));
+    }
+
     // Each APP2 marker numbers itself and the total in a byte.
     let icc_chunks = icc_profile.map_or(0, |icc| icc.chunks(ICC_CHUNK_SIZE).len());
     let icc_chunk_count =
@@ -256,6 +294,14 @@ pub fn encode(
             jpeg_set_defaults(&mut dst);
             jpeg_set_quality(&mut dst, c_int::from(quality), 0);
             dst.optimize_coding = 1;
+            // Luma is sampled relative to the chroma components, which stay at 1×1.
+            let components = slice::from_raw_parts_mut(dst.comp_info, 3);
+            components[0].h_samp_factor = c_int::from(horizontal);
+            components[0].v_samp_factor = c_int::from(vertical);
+            for chroma in &mut components[1..] {
+                chroma.h_samp_factor = 1;
+                chroma.v_samp_factor = 1;
+            }
 
             let mut size: c_ulong = 0;
             jpeg_mem_dest(&mut dst, &raw mut out, &raw mut size);
