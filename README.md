@@ -8,7 +8,8 @@ Losslessly compress PNG, JPEG and SVG images, and convert between PNG, JPEG, SVG
 cargo install --path .
 ```
 
-Only the Rust toolchain is needed.
+Only the Rust toolchain is needed, plus [nasm](https://www.nasm.us) on x86_64 (e.g.
+`brew install nasm` or `apt install nasm`).
 
 ## Optimising
 
