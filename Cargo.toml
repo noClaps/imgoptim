@@ -1,9 +1,0 @@
-[package]
-name = "imgoptim"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-argp = "0.4.1"
-heic = { version = "0.1.6", features = ["parallel"] }
-image = { version = "0.25.10", default-features = false, features = ["avif"] }
