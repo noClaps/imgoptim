@@ -3,13 +3,22 @@
 Losslessly compress PNG, JPEG, SVG, WebP and JPEG XL images at maximum effort, and convert
 between those and AVIF and HEIF.
 
-Every codec is pure Rust or bundled C compiled with the crate, so no system libraries are needed.
 
 ## Installation
 
 ```sh
 cargo install --path .
 ```
+
+Nothing needs to be installed beyond the Rust toolchain: no CMake, nasm, pkg-config or system
+libraries. Every codec is pure Rust or bundled C that the crate compiles itself, and the binary
+links only the operating system's own libraries.
+
+AV1 assembly (for AVIF) is only enabled on ARM, where it builds with the standard toolchain; on
+x86 it would need nasm, so AVIF uses rav1e's and rav1d's pure-Rust code paths there, which are
+slower. For the same reason, [`avif-decode`](https://github.com/kornelski/avif-decode) is vendored
+in `vendor/avif-decode`, unchanged apart from its manifest. mozjpeg uses its x86 SIMD only if
+nasm happens to be installed.
 
 ## Usage
 
