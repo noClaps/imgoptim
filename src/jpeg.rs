@@ -6,13 +6,12 @@ use std::{
 };
 
 use mozjpeg_sys::{
-    J_BOOLEAN_PARAM, J_COLOR_SPACE, J_INT_PARAM, jpeg_c_set_bool_param, jpeg_c_set_int_param,
-    jpeg_common_struct, jpeg_compress_struct, jpeg_copy_critical_parameters, jpeg_create_compress,
-    jpeg_create_decompress, jpeg_decompress_struct, jpeg_destroy_compress, jpeg_destroy_decompress,
-    jpeg_error_mgr, jpeg_finish_compress, jpeg_finish_decompress, jpeg_mem_dest, jpeg_mem_src,
-    jpeg_read_coefficients, jpeg_read_header, jpeg_save_markers, jpeg_set_defaults,
-    jpeg_set_quality, jpeg_simple_progression, jpeg_start_compress, jpeg_std_error,
-    jpeg_write_coefficients, jpeg_write_marker, jpeg_write_scanlines, jvirt_barray_control,
+    J_BOOLEAN_PARAM, jpeg_c_set_bool_param, jpeg_common_struct, jpeg_compress_struct,
+    jpeg_copy_critical_parameters, jpeg_create_compress, jpeg_create_decompress,
+    jpeg_decompress_struct, jpeg_destroy_compress, jpeg_destroy_decompress, jpeg_error_mgr,
+    jpeg_finish_compress, jpeg_finish_decompress, jpeg_mem_dest, jpeg_mem_src,
+    jpeg_read_coefficients, jpeg_read_header, jpeg_save_markers, jpeg_simple_progression,
+    jpeg_std_error, jpeg_write_coefficients, jpeg_write_marker, jvirt_barray_control,
 };
 
 const APP1: c_int = 0xE1;
@@ -224,77 +223,10 @@ fn recompress(data: &[u8], progressive_modes: &[bool]) -> Result<Vec<u8>, String
     }
 }
 
-/// The most ICC profile data that fits in one APP2 marker, after its signature and sequence bytes.
-const ICC_CHUNK_SIZE: usize = 65519;
-
-/// Encode 8-bit RGB pixels with mozjpeg's maximum compression profile (progressive scans with
-/// optimised scan order, trellis quantisation and optimised Huffman tables) and the standard
-/// quantisation tables, without chroma subsampling.
-pub fn encode(
-    rgb: &[u8],
-    width: u32,
-    height: u32,
-    quality: u8,
-    icc_profile: Option<&[u8]>,
-) -> Result<Vec<u8>, String> {
-    // Each APP2 marker numbers itself and the total in a byte.
-    let icc_chunks = icc_profile.map_or(0, |icc| icc.chunks(ICC_CHUNK_SIZE).len());
-    let icc_chunk_count =
-        u8::try_from(icc_chunks).map_err(|_| "ICC profile is too large for JPEG")?;
-
-    unsafe {
-        let mut err = error_manager();
-        let mut dst: Box<jpeg_compress_struct> = Box::new(mem::zeroed());
-        dst.common.err = &raw mut *err;
-        let mut out: *mut u8 = ptr::null_mut();
-
-        let result = catch(|| {
-            jpeg_create_compress(&raw mut *dst);
-            dst.image_width = width;
-            dst.image_height = height;
-            dst.input_components = 3;
-            dst.in_color_space = J_COLOR_SPACE::JCS_RGB;
-            jpeg_set_defaults(&mut dst);
-            // The standard tables from the JPEG specification, rather than mozjpeg's default,
-            // give smaller files at the same accuracy at high qualities.
-            jpeg_c_set_int_param(&mut dst, J_INT_PARAM::JINT_BASE_QUANT_TBL_IDX, 0);
-            jpeg_set_quality(&mut dst, c_int::from(quality), 0);
-            dst.optimize_coding = 1;
-            // 4:4:4: every component at full resolution, which keeps the most colour detail.
-            for component in slice::from_raw_parts_mut(dst.comp_info, 3) {
-                component.h_samp_factor = 1;
-                component.v_samp_factor = 1;
-            }
-
-            let mut size: c_ulong = 0;
-            jpeg_mem_dest(&mut dst, &raw mut out, &raw mut size);
-            jpeg_start_compress(&mut dst, 1);
-            if let Some(icc) = icc_profile {
-                for (sequence, chunk) in (1..=icc_chunk_count).zip(icc.chunks(ICC_CHUNK_SIZE)) {
-                    let marker = [ICC_SIGNATURE, &[sequence, icc_chunk_count], chunk].concat();
-                    let length =
-                        c_uint::try_from(marker.len()).expect("ICC chunks fit in a marker");
-                    jpeg_write_marker(&mut dst, APP2, marker.as_ptr(), length);
-                }
-            }
-            for row in rgb.chunks_exact(width as usize * 3) {
-                jpeg_write_scanlines(&mut dst, &row.as_ptr(), 1);
-            }
-            jpeg_finish_compress(&mut dst);
-            take_output(&mut out, size)
-        });
-
-        if !out.is_null() {
-            libc::free(out.cast());
-        }
-        jpeg_destroy_compress(&mut dst);
-        result
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use mozjpeg_sys::{JCOEF, JINT_COMPRESS_PROFILE_VALUE, jpeg_marker};
+    use mozjpeg::{ColorSpace, Compress, Marker};
+    use mozjpeg_sys::JCOEF;
 
     use super::*;
 
@@ -303,7 +235,7 @@ mod tests {
         clippy::cast_possible_truncation,
         reason = "the channel values are all at most 255"
     )]
-    fn encode_baseline(width: u32, height: u32, markers: &[(c_int, &[u8])]) -> Vec<u8> {
+    fn encode_baseline(width: u32, height: u32, markers: &[(Marker, &[u8])]) -> Vec<u8> {
         let pixels: Vec<u8> = (0..height)
             .flat_map(|y| {
                 (0..width).flat_map(move |x| {
@@ -316,44 +248,16 @@ mod tests {
             })
             .collect();
 
-        unsafe {
-            let mut err: jpeg_error_mgr = mem::zeroed();
-            jpeg_std_error(&mut err);
-            err.error_exit = Some(error_exit);
-            let mut dst: jpeg_compress_struct = mem::zeroed();
-            dst.common.err = &raw mut err;
-            jpeg_create_compress(&raw mut dst);
-
-            dst.image_width = width;
-            dst.image_height = height;
-            dst.input_components = 3;
-            dst.in_color_space = J_COLOR_SPACE::JCS_RGB;
-            jpeg_c_set_int_param(
-                &mut dst,
-                J_INT_PARAM::JINT_COMPRESS_PROFILE,
-                JINT_COMPRESS_PROFILE_VALUE::JCP_FASTEST as c_int,
-            );
-            jpeg_set_defaults(&mut dst);
-            jpeg_set_quality(&mut dst, 90, 1);
-
-            let mut out: *mut u8 = ptr::null_mut();
-            let mut size: c_ulong = 0;
-            jpeg_mem_dest(&mut dst, &raw mut out, &raw mut size);
-            jpeg_start_compress(&mut dst, 1);
-            for (code, data) in markers {
-                let length = c_uint::try_from(data.len()).unwrap();
-                jpeg_write_marker(&mut dst, *code, data.as_ptr(), length);
-            }
-            for row in pixels.chunks_exact(width as usize * 3) {
-                jpeg_write_scanlines(&mut dst, &row.as_ptr(), 1);
-            }
-            jpeg_finish_compress(&mut dst);
-            jpeg_destroy_compress(&mut dst);
-
-            let result = slice::from_raw_parts(out, usize::try_from(size).unwrap()).to_vec();
-            libc::free(out.cast());
-            result
+        let mut compress = Compress::new(ColorSpace::JCS_RGB);
+        compress.set_fastest_defaults();
+        compress.set_size(width as usize, height as usize);
+        compress.set_quality(90.0);
+        let mut started = compress.start_compress(Vec::new()).unwrap();
+        for (marker, data) in markers {
+            started.write_marker(*marker, data);
         }
+        started.write_scanlines(&pixels).unwrap();
+        started.finish().unwrap()
     }
 
     /// Every component's quantisation table and DCT coefficients, which fully determine the
@@ -408,10 +312,10 @@ mod tests {
             64,
             64,
             &[
-                (APP1, &exif),
-                (APP1, xmp),
-                (APP2, &icc),
-                (jpeg_marker::COM as c_int, b"a comment"),
+                (Marker::APP(1), &exif),
+                (Marker::APP(1), xmp),
+                (Marker::APP(2), &icc),
+                (Marker::COM, b"a comment"),
             ],
         );
 
@@ -427,7 +331,7 @@ mod tests {
 
     #[test]
     fn drops_default_orientation() {
-        let original = encode_baseline(32, 32, &[(APP1, &minimal_exif(1))]);
+        let original = encode_baseline(32, 32, &[(Marker::APP(1), &minimal_exif(1))]);
         let optimised = optimise(&original).unwrap();
         assert!(!optimised.windows(4).any(|w| w == b"Exif"));
     }

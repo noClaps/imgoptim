@@ -6,7 +6,7 @@ use std::{
     process::ExitCode,
 };
 
-use crate::{Format, OptimiseArgs, detect, jpeg, png, svg};
+use crate::{Args, Format, detect, jpeg, png, svg};
 
 /// Collect every file under `dir` with a supported extension, in a stable order. Symlinked
 /// directories aren't followed, so links can't cause loops.
@@ -27,23 +27,17 @@ fn find_images(dir: &Path, images: &mut Vec<PathBuf>) -> io::Result<()> {
 fn optimise(path: &Path, output: &Path, zopfli_iterations: NonZeroU64) -> Result<(), String> {
     let data = read(path).map_err(|e| e.to_string())?;
     let optimised = match detect(path, &data) {
-        Some(Format::Png) => Some(png::optimise(&data, zopfli_iterations)?),
-        Some(Format::Jpeg) => Some(jpeg::optimise(&data)?),
-        Some(Format::Svg) => Some(svg::optimise(&data)?),
-        // Its encoders are lossy, so re-encoding would change the image.
-        Some(Format::Avif) => None,
-        None => return Err("not a supported image format".to_owned()),
+        Some(Format::Png) => png::optimise(&data, zopfli_iterations)?,
+        Some(Format::Jpeg) => jpeg::optimise(&data)?,
+        Some(Format::Svg) => svg::optimise(&data)?,
+        None => return Err("not a PNG, JPEG or SVG".to_owned()),
     };
 
     let before = data.len();
-    let note = if optimised.is_none() {
-        " (can't be recompressed losslessly)"
+    let result = if optimised.len() < before {
+        optimised
     } else {
-        ""
-    };
-    let result = match optimised {
-        Some(optimised) if optimised.len() < before => optimised,
-        _ => data,
+        data
     };
     let after = result.len();
 
@@ -63,13 +57,13 @@ fn optimise(path: &Path, output: &Path, zopfli_iterations: NonZeroU64) -> Result
     // Ignore failures, e.g. when piped into `head`, so the remaining images still get optimised.
     let _ = writeln!(
         io::stdout(),
-        "{}: {before} → {after} bytes ({change:.2}%){note}",
+        "{}: {before} → {after} bytes ({change:.2}%)",
         path.display(),
     );
     Ok(())
 }
 
-pub fn run(args: &OptimiseArgs) -> ExitCode {
+pub fn run(args: &Args) -> ExitCode {
     if args.paths.is_empty() {
         eprintln!("No images given. Run with --help for usage.");
         return ExitCode::FAILURE;

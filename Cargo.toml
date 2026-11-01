@@ -5,16 +5,14 @@ edition = "2024"
 
 [dependencies]
 argp = "0.4.1"
-avif-decode = { version = "3.0.0", default-features = false }
-avif-serialize = "0.8"
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 libc = "0.2.191"
-moxcms = "0.8"
 mozjpeg-sys = "2"
 oxipng = { version = "10.2.1", default-features = false, features = ["parallel", "zopfli"] }
 oxvg_ast = { version = "0.0.9", features = ["roxmltree"] }
 oxvg_optimiser = "0.0.9"
-rav1e = { version = "0.8", default-features = false, features = ["asm", "threading"] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+
+[dev-dependencies]
+mozjpeg = "0.10"
