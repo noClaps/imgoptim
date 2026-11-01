@@ -162,6 +162,17 @@ unsafe fn transcode(
 /// baseline and progressive scans and keeping whichever is smaller. Equivalent to mozjpeg's
 /// `jpegtran -copy none -optimize`, keeping the colour profile and orientation.
 pub fn optimise(data: &[u8]) -> Result<Vec<u8>, String> {
+    recompress(data, &[true, false])
+}
+
+/// Losslessly re-encode a JPEG with baseline (sequential) scans, as `optimise` does.
+pub fn baseline(data: &[u8]) -> Result<Vec<u8>, String> {
+    recompress(data, &[false])
+}
+
+/// Re-encode the DCT coefficients once per scan mode (`true` for progressive), returning the
+/// smallest result.
+fn recompress(data: &[u8], progressive_modes: &[bool]) -> Result<Vec<u8>, String> {
     unsafe {
         let mut err = error_manager();
         let mut src: Box<jpeg_decompress_struct> = Box::new(mem::zeroed());
@@ -181,15 +192,22 @@ pub fn optimise(data: &[u8]) -> Result<Vec<u8>, String> {
             let coefficients = jpeg_read_coefficients(&mut src);
             let markers = display_markers(&src);
 
-            let progressive = transcode(&src, &mut dst, coefficients, &markers, true, &mut out);
-            let baseline = transcode(&src, &mut dst, coefficients, &markers, false, &mut out);
+            let smallest = progressive_modes
+                .iter()
+                .map(|&progressive| {
+                    transcode(
+                        &src,
+                        &mut dst,
+                        coefficients,
+                        &markers,
+                        progressive,
+                        &mut out,
+                    )
+                })
+                .min_by_key(Vec::len)
+                .expect("at least one scan mode");
             jpeg_finish_decompress(&mut src);
-
-            if baseline.len() < progressive.len() {
-                baseline
-            } else {
-                progressive
-            }
+            smallest
         });
 
         if !out.is_null() {

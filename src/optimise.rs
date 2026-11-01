@@ -6,7 +6,7 @@ use std::{
     process::ExitCode,
 };
 
-use crate::{Format, OptimiseArgs, detect, jpeg, png, svg};
+use crate::{Format, OptimiseArgs, detect, jpeg, jxl, png, svg, webp};
 
 /// Collect every file under `dir` with a supported extension, in a stable order. Symlinked
 /// directories aren't followed, so links can't cause loops.
@@ -27,17 +27,25 @@ fn find_images(dir: &Path, images: &mut Vec<PathBuf>) -> io::Result<()> {
 fn optimise(path: &Path, output: &Path, zopfli_iterations: NonZeroU64) -> Result<(), String> {
     let data = read(path).map_err(|e| e.to_string())?;
     let optimised = match detect(path, &data) {
-        Some(Format::Png) => png::optimise(&data, zopfli_iterations)?,
-        Some(Format::Jpeg) => jpeg::optimise(&data)?,
-        Some(Format::Svg) => svg::optimise(&data)?,
-        None => return Err("not a PNG, JPEG or SVG".to_owned()),
+        Some(Format::Png) => Some(png::optimise(&data, zopfli_iterations)?),
+        Some(Format::Jpeg) => Some(jpeg::optimise(&data)?),
+        Some(Format::Svg) => Some(svg::optimise(&data)?),
+        Some(Format::Webp) => Some(webp::optimise(&data)?),
+        Some(Format::Jxl) => Some(jxl::optimise(&data)?),
+        // Their encoders are lossy, so re-encoding would change the image.
+        Some(Format::Avif | Format::Heif) => None,
+        None => return Err("not a supported image format".to_owned()),
     };
 
     let before = data.len();
-    let result = if optimised.len() < before {
-        optimised
+    let note = if optimised.is_none() {
+        " (can't be recompressed losslessly)"
     } else {
-        data
+        ""
+    };
+    let result = match optimised {
+        Some(optimised) if optimised.len() < before => optimised,
+        _ => data,
     };
     let after = result.len();
 
@@ -52,7 +60,7 @@ fn optimise(path: &Path, output: &Path, zopfli_iterations: NonZeroU64) -> Result
     // Ignore failures, e.g. when piped into `head`, so the remaining images still get optimised.
     let _ = writeln!(
         io::stdout(),
-        "{}: {before} → {after} bytes ({:.2}%)",
+        "{}: {before} → {after} bytes ({:.2}%){note}",
         path.display(),
         (after as f64 - before as f64) / before as f64 * 100.0
     );

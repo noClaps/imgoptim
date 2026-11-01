@@ -5,12 +5,19 @@ edition = "2024"
 
 [dependencies]
 argp = "0.4.1"
+avif-decode = { version = "3.0.0", default-features = false }
 base64 = "0.23"
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+heifer = { version = "0.3.15", features = ["image"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
+jxl-encoder = { version = "0.3.4", features = ["parallel", "jpeg-reencoding"] }
+jxl-image-rs-integration = "0.8"
+jxl-oxide = "0.12.6"
 libc = "0.2.191"
+libwebp-sys = "0.14.4"
 mozjpeg-sys = "2"
 oxipng = { version = "10.2.1", default-features = false, features = ["parallel", "zopfli"] }
 oxvg_ast = { version = "0.0.9", features = ["roxmltree"] }
 oxvg_optimiser = "0.0.9"
+ravif = "0.13.0"
 resvg = "0.49.0"
 roxmltree = "0.21"
