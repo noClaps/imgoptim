@@ -6,19 +6,9 @@ env:
 
 jobs:
   test:
-    strategy:
-      fail-fast: false
-      matrix:
-        # x86_64 Linux and arm64 macOS, so the assembly for both architectures is built.
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
-      # The x86_64 assembly in the AV1 and JPEG codecs is built with nasm.
-      - if: runner.arch == 'X64' && runner.os == 'Linux'
-        run: sudo apt-get install -y nasm
-      - if: runner.arch == 'X64' && runner.os == 'macOS'
-        run: brew install nasm
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked
       - run: cargo clippy --release --locked --all-targets

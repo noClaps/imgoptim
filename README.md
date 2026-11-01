@@ -8,8 +8,7 @@ Losslessly compress PNG, JPEG and SVG images, and convert between PNG, JPEG and 
 cargo install --path .
 ```
 
-Only the Rust toolchain is needed, plus [nasm](https://www.nasm.us) on x86_64 (e.g.
-`brew install nasm` or `apt install nasm`).
+imgoptim supports macOS on Apple silicon, and only needs the Rust toolchain.
 
 ## Optimising
 
