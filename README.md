@@ -17,7 +17,7 @@ imgoptim [-o <output>] [-i <zopfli-iterations>] [-r] [paths...]
 | Option                            | Description                                                                                   |
 | --------------------------------- | --------------------------------------------------------------------------------------------- |
 | `paths...`                        | One or more images, or directories with `-r`, to optimise. Without `-o`, each image is overwritten in place. |
-| `-o`, `--output <output>`         | Write the result to this path instead of overwriting the input. Only valid with a single file. |
+| `-o`, `--output <output>`         | Write the result to this path instead of overwriting the input. Only valid with a single input. With `-r` and a directory, the directory structure is mirrored under this path. |
 | `-i`, `--zopfli-iterations <n>`   | Zopfli iterations per PNG trial (default: 15). Higher is slower and rarely smaller.           |
 | `-r`, `--recursive`               | Optimise every PNG, JPEG and SVG in the given directories and all their subdirectories.       |
 | `-h`, `--help`                    | Show the help message.                                                                        |
@@ -31,6 +31,7 @@ imgoptim image.png photo.jpg icon.svg      # optimise in place
 imgoptim photo.jpg -o photo.min.jpg        # write elsewhere
 imgoptim -i 50 image.png                   # more Zopfli iterations
 imgoptim -r assets                         # every image in a folder, recursively
+imgoptim -r assets -o dist/assets          # mirror the folder's optimised images into dist/assets
 ```
 
 ### Behaviour
@@ -38,6 +39,9 @@ imgoptim -r assets                         # every image in a folder, recursivel
 - With `-r`, directories are searched for files ending in `.png`, `.jpg`, `.jpeg` or `.svg` (in
   any case); other files are ignored. Symlinked directories aren't followed. Passing a directory
   without `-r` is an error.
+- With `-r` and `-o`, each image is written to the same relative path under the output
+  directory, e.g. `assets/icons/logo.svg` → `dist/assets/icons/logo.svg`. Missing directories are
+  created and the input is left untouched. Only supported images are written, not other files.
 - Files are detected by their contents, not their extension. SVGs are recognised by a `.svg`
   extension or by starting with `<`.
 - A file is only rewritten when the result is smaller. With `-o`, the output is always written,

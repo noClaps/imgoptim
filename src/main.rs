@@ -4,7 +4,7 @@ mod svg;
 
 use std::{
     ffi::OsStr,
-    fs::{read, read_dir, write},
+    fs::{create_dir_all, read, read_dir, write},
     io,
     num::NonZeroU64,
     path::{Path, PathBuf},
@@ -16,7 +16,8 @@ use argp::FromArgs;
 /// Losslessly compress SVG, PNG and JPEG images at maximum effort.
 #[derive(FromArgs)]
 struct Args {
-    /// Write the result here instead of overwriting the input. Only valid with a single input.
+    /// Write the result here instead of overwriting the input. Only valid with a single input. For
+    /// a directory with -r, the input's directory structure is recreated under this path.
     #[argp(option, short = 'o')]
     output: Option<PathBuf>,
 
@@ -105,6 +106,11 @@ fn optimise(path: &Path, output: &Path, zopfli_iterations: NonZeroU64) -> Result
     };
     let after = result.len();
 
+    if output != path
+        && let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty())
+    {
+        create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
     if after < before || output != path {
         write(output, &result).map_err(|e| e.to_string())?;
     }
@@ -122,30 +128,46 @@ fn main() -> ExitCode {
         eprintln!("No images given. Run with --help for usage.");
         return ExitCode::FAILURE;
     }
-    if args.output.is_some() && (args.paths.len() > 1 || args.paths[0].is_dir()) {
-        eprintln!("--output can only be used with a single file.");
+    if args.output.is_some() && args.paths.len() > 1 {
+        eprintln!("--output can only be used with a single file or directory.");
         return ExitCode::FAILURE;
     }
 
     let mut status = ExitCode::SUCCESS;
+    // Pairs of (input, output) paths.
     let mut images = Vec::new();
     for path in &args.paths {
         if !path.is_dir() {
-            images.push(path.clone());
-        } else if !args.recursive {
+            let output = args.output.clone().unwrap_or_else(|| path.clone());
+            images.push((path.clone(), output));
+            continue;
+        }
+        if !args.recursive {
             eprintln!(
                 "{}: is a directory (use -r to optimise its images)",
                 path.display()
             );
             status = ExitCode::FAILURE;
-        } else if let Err(e) = find_images(path, &mut images) {
+            continue;
+        }
+
+        let mut found = Vec::new();
+        if let Err(e) = find_images(path, &mut found) {
             eprintln!("{}: {e}", path.display());
             status = ExitCode::FAILURE;
+            continue;
         }
+        // With an output directory, mirror each image's location relative to the input directory.
+        images.extend(found.into_iter().map(|image| {
+            let output = match &args.output {
+                Some(dir) => dir.join(image.strip_prefix(path).expect("found under path")),
+                None => image.clone(),
+            };
+            (image, output)
+        }));
     }
 
-    for path in &images {
-        let output = args.output.as_deref().unwrap_or(path);
+    for (path, output) in &images {
         if let Err(e) = optimise(path, output, args.zopfli_iterations) {
             eprintln!("{}: {e}", path.display());
             status = ExitCode::FAILURE;
