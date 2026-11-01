@@ -5,7 +5,7 @@ mod svg;
 use std::{
     ffi::OsStr,
     fs::{create_dir_all, read, read_dir, write},
-    io,
+    io::{self, Write},
     num::NonZeroU64,
     path::{Path, PathBuf},
     process::ExitCode,
@@ -114,7 +114,9 @@ fn optimise(path: &Path, output: &Path, zopfli_iterations: NonZeroU64) -> Result
     if after < before || output != path {
         write(output, &result).map_err(|e| e.to_string())?;
     }
-    println!(
+    // Ignore failures, e.g. when piped into `head`, so the remaining images still get optimised.
+    let _ = writeln!(
+        io::stdout(),
         "{}: {before} → {after} bytes ({:.2}%)",
         path.display(),
         (after as f64 - before as f64) / before as f64 * 100.0
