@@ -175,11 +175,6 @@ pub fn optimise(data: &[u8]) -> Result<Vec<u8>, String> {
     recompress(data, &[true, false])
 }
 
-/// Losslessly re-encode a JPEG with baseline (sequential) scans, as `optimise` does.
-pub fn baseline(data: &[u8]) -> Result<Vec<u8>, String> {
-    recompress(data, &[false])
-}
-
 /// Re-encode the DCT coefficients once per scan mode (`true` for progressive), returning the
 /// smallest result.
 fn recompress(data: &[u8], progressive_modes: &[bool]) -> Result<Vec<u8>, String> {

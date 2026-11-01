@@ -6,7 +6,7 @@ use std::{
     process::ExitCode,
 };
 
-use crate::{Format, OptimiseArgs, detect, jpeg, jxl, png, svg, webp};
+use crate::{Format, OptimiseArgs, detect, jpeg, png, svg};
 
 /// Collect every file under `dir` with a supported extension, in a stable order. Symlinked
 /// directories aren't followed, so links can't cause loops.
@@ -30,8 +30,6 @@ fn optimise(path: &Path, output: &Path, zopfli_iterations: NonZeroU64) -> Result
         Some(Format::Png) => Some(png::optimise(&data, zopfli_iterations)?),
         Some(Format::Jpeg) => Some(jpeg::optimise(&data)?),
         Some(Format::Svg) => Some(svg::optimise(&data)?),
-        Some(Format::Webp) => Some(webp::optimise(&data)?),
-        Some(Format::Jxl) => Some(jxl::optimise(&data)?),
         // Their encoders are lossy, so re-encoding would change the image.
         Some(Format::Avif | Format::Heif) => None,
         None => return Err("not a supported image format".to_owned()),

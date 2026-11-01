@@ -8,7 +8,7 @@ use std::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use image::{
     DynamicImage, GenericImageView, ImageDecoder, ImageEncoder, ImageReader, Rgb, RgbImage,
-    RgbaImage, codecs::png::PngEncoder, imageops::FilterType, metadata::Orientation,
+    RgbaImage, codecs::png::PngEncoder, imageops::FilterType,
 };
 use resvg::{tiny_skia, usvg};
 
@@ -17,13 +17,12 @@ use heifer::{
     image_crate::{HeifDecoder, HeifEncoder},
 };
 
-use crate::{Format, avif, detect, jpeg, jxl, png, svg, webp};
+use crate::{Format, avif, detect, jpeg, png, svg};
 
 pub struct Settings {
     pub width: Option<NonZeroU32>,
     pub height: Option<NonZeroU32>,
     pub quality: u8,
-    pub lossless: bool,
     pub zopfli_iterations: NonZeroU64,
 }
 
@@ -58,8 +57,6 @@ pub fn target_size(
 struct Raster {
     image: DynamicImage,
     icc_profile: Option<Vec<u8>>,
-    /// Whether the pixels were rotated or resized after decoding.
-    transformed: bool,
 }
 
 fn from_decoder(mut decoder: impl ImageDecoder) -> Result<Raster, String> {
@@ -68,11 +65,7 @@ fn from_decoder(mut decoder: impl ImageDecoder) -> Result<Raster, String> {
     let icc_profile = decoder.icc_profile().map_err(error)?;
     let mut image = DynamicImage::from_decoder(decoder).map_err(error)?;
     image.apply_orientation(orientation);
-    Ok(Raster {
-        image,
-        icc_profile,
-        transformed: orientation != Orientation::NoTransforms,
-    })
+    Ok(Raster { image, icc_profile })
 }
 
 fn decode(data: &[u8], format: Format) -> Result<Raster, String> {
@@ -80,18 +73,9 @@ fn decode(data: &[u8], format: Format) -> Result<Raster, String> {
         Format::Heif => {
             from_decoder(HeifDecoder::new(Cursor::new(data)).map_err(|e| e.to_string())?)
         }
-        Format::Jxl => {
-            let (image, icc_profile) = jxl::decode(data)?;
-            Ok(Raster {
-                image,
-                icc_profile,
-                transformed: false,
-            })
-        }
         Format::Avif => Ok(Raster {
             image: avif::decode(data)?,
             icc_profile: None,
-            transformed: false,
         }),
         _ => from_decoder(
             ImageReader::new(Cursor::new(data))
@@ -140,7 +124,6 @@ fn rasterise(data: &[u8], path: &Path, settings: &Settings) -> Result<Raster, St
     Ok(Raster {
         image: DynamicImage::ImageRgba8(image),
         icc_profile: None,
-        transformed: false,
     })
 }
 
@@ -160,7 +143,6 @@ fn resize(raster: Raster, settings: &Settings) -> Raster {
         image: raster
             .image
             .resize_exact(width, height, FilterType::Lanczos3),
-        transformed: true,
         ..raster
     }
 }
@@ -219,15 +201,14 @@ fn encode_heif(raster: &Raster, settings: &Settings) -> Result<Vec<u8>, String> 
     Ok(data)
 }
 
-/// Wrap a raster image in an SVG. Lossy JPEG sources without transparency stay JPEG inside,
-/// everything else is embedded as PNG.
+/// Wrap a raster image in an SVG. JPEG sources without transparency stay JPEG inside, everything
+/// else is embedded as PNG.
 fn encode_svg(raster: &Raster, from: Format, settings: &Settings) -> Result<Vec<u8>, String> {
-    let (mime, data) =
-        if from == Format::Jpeg && !settings.lossless && !raster.image.color().has_alpha() {
-            ("image/jpeg", encode_jpeg(raster, settings)?)
-        } else {
-            ("image/png", encode_png(raster, settings)?)
-        };
+    let (mime, data) = if from == Format::Jpeg && !raster.image.color().has_alpha() {
+        ("image/jpeg", encode_jpeg(raster, settings)?)
+    } else {
+        ("image/png", encode_png(raster, settings)?)
+    };
     let (width, height) = raster.image.dimensions();
     Ok(format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><image width="{width}" height="{height}" href="data:{mime};base64,{}"/></svg>"#,
@@ -238,40 +219,16 @@ fn encode_svg(raster: &Raster, from: Format, settings: &Settings) -> Result<Vec<
 
 fn encode(
     raster: &Raster,
-    original: &[u8],
     from: Format,
     to: Format,
     settings: &Settings,
 ) -> Result<Vec<u8>, String> {
-    let quality = (!settings.lossless).then_some(settings.quality);
-    let lossy_only = |name: &str| {
-        Err(format!(
-            "{name} output is lossy only, so --lossless isn't supported"
-        ))
-    };
     match to {
         Format::Png => encode_png(raster, settings),
         Format::Svg => encode_svg(raster, from, settings),
-        Format::Jpeg if settings.lossless => lossy_only("JPEG"),
         Format::Jpeg => encode_jpeg(raster, settings),
-        Format::Avif if settings.lossless => lossy_only("AVIF"),
         Format::Avif => avif::encode(&raster.image, settings.quality),
-        Format::Heif if settings.lossless => lossy_only("HEIF"),
         Format::Heif => encode_heif(raster, settings),
-        Format::Webp => {
-            let rgba = raster.image.to_rgba8();
-            webp::encode(
-                &rgba,
-                rgba.width(),
-                rgba.height(),
-                quality,
-                raster.icc_profile.as_deref(),
-            )
-        }
-        Format::Jxl if settings.lossless && from == Format::Jpeg && !raster.transformed => {
-            jxl::transcode_jpeg(original)
-        }
-        Format::Jxl => jxl::encode(&raster.image, raster.icc_profile.as_deref(), quality),
     }
 }
 
@@ -280,28 +237,15 @@ fn encode(
 pub fn convert(input: &Path, output: &Path, settings: &Settings) -> Result<(), String> {
     let data = read(input).map_err(|e| e.to_string())?;
     let from = detect(input, &data).ok_or("not a supported image format")?;
-    let to = Format::from_extension(output).ok_or(
-        "the output path must end in .png, .jpg, .jpeg, .svg, .webp, .avif, .heic, .heif or .jxl",
-    )?;
+    let to = Format::from_extension(output)
+        .ok_or("the output path must end in .png, .jpg, .jpeg, .svg, .avif, .heic or .heif")?;
 
     let result = match (from, to) {
         (Format::Svg, Format::Svg) => {
             svg::optimise(&svg::resize(&data, settings.width, settings.height)?)?
         }
-        (Format::Svg, _) => encode(
-            &rasterise(&data, input, settings)?,
-            &data,
-            from,
-            to,
-            settings,
-        )?,
-        _ => encode(
-            &resize(decode(&data, from)?, settings),
-            &data,
-            from,
-            to,
-            settings,
-        )?,
+        (Format::Svg, _) => encode(&rasterise(&data, input, settings)?, from, to, settings)?,
+        _ => encode(&resize(decode(&data, from)?, settings), from, to, settings)?,
     };
 
     if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {

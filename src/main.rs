@@ -1,11 +1,9 @@
 mod avif;
 mod convert;
 mod jpeg;
-mod jxl;
 mod optimise;
 mod png;
 mod svg;
-mod webp;
 
 use std::{
     ffi::OsStr,
@@ -16,7 +14,7 @@ use std::{
 
 use argp::FromArgs;
 
-/// Optimise and convert PNG, JPEG, SVG, WebP, AVIF, HEIF and JPEG XL images.
+/// Optimise and convert PNG, JPEG, SVG, AVIF and HEIF images.
 #[derive(FromArgs)]
 struct Args {
     #[argp(subcommand)]
@@ -30,8 +28,8 @@ enum Command {
     Convert(ConvertArgs),
 }
 
-/// Losslessly compress PNG, JPEG, SVG, WebP and JPEG XL images at maximum effort. AVIF and HEIF
-/// files are left as they are, since they can't be recompressed losslessly.
+/// Losslessly compress PNG, JPEG and SVG images at maximum effort. AVIF and HEIF files are left as
+/// they are, since they can't be recompressed losslessly.
 #[derive(FromArgs)]
 #[argp(subcommand, name = "optimise")]
 struct OptimiseArgs {
@@ -58,7 +56,7 @@ struct OptimiseArgs {
     paths: Vec<PathBuf>,
 }
 
-/// Convert an image between PNG, JPEG, SVG, WebP, AVIF, HEIF and JPEG XL, optionally resizing it.
+/// Convert an image between PNG, JPEG, SVG, AVIF and HEIF, optionally resizing it.
 /// The output format comes from the output path's extension.
 #[derive(FromArgs)]
 #[argp(subcommand, name = "convert")]
@@ -71,14 +69,9 @@ struct ConvertArgs {
     #[argp(option, short = 'H', from_str_fn(parse_dimension))]
     height: Option<NonZeroU32>,
 
-    /// Quality from 1 to 100 for lossy output: JPEG, WebP, AVIF, HEIF and JPEG XL (default: 85).
+    /// Quality from 1 to 100 for lossy output: JPEG, AVIF and HEIF (default: 85).
     #[argp(option, short = 'q', default = "85", from_str_fn(parse_quality))]
     quality: u8,
-
-    /// Store WebP and JPEG XL output losslessly, ignoring --quality. A JPEG converted to JPEG XL
-    /// without resizing is recompressed bit-exactly, so the original JPEG can be recovered.
-    #[argp(switch, short = 'l')]
-    lossless: bool,
 
     /// Zopfli iterations per PNG trial (default: 15). Higher is slower and rarely smaller.
     #[argp(
@@ -93,8 +86,8 @@ struct ConvertArgs {
     #[argp(positional)]
     input: PathBuf,
 
-    /// Where to write the converted image, ending in .png, .jpg, .jpeg, .svg, .webp, .avif,
-    /// .heic, .heif or .jxl.
+    /// Where to write the converted image, ending in .png, .jpg, .jpeg, .svg, .avif, .heic or
+    /// .heif.
     #[argp(positional)]
     output: PathBuf,
 }
@@ -124,10 +117,8 @@ enum Format {
     Png,
     Jpeg,
     Svg,
-    Webp,
     Avif,
     Heif,
-    Jxl,
 }
 
 impl Format {
@@ -138,11 +129,9 @@ impl Format {
             ("jpg", Self::Jpeg),
             ("jpeg", Self::Jpeg),
             ("svg", Self::Svg),
-            ("webp", Self::Webp),
             ("avif", Self::Avif),
             ("heic", Self::Heif),
             ("heif", Self::Heif),
-            ("jxl", Self::Jxl),
         ]
         .into_iter()
         .find(|(ext, _)| extension.eq_ignore_ascii_case(ext))
@@ -191,10 +180,6 @@ fn detect(path: &Path, data: &[u8]) -> Option<Format> {
         Some(Format::Png)
     } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
         Some(Format::Jpeg)
-    } else if data.get(..4) == Some(b"RIFF") && data.get(8..12) == Some(b"WEBP") {
-        Some(Format::Webp)
-    } else if data.starts_with(&[0xFF, 0x0A]) || data.starts_with(b"\0\0\0\x0cJXL \r\n\x87\n") {
-        Some(Format::Jxl)
     } else if let Some(format) = isobmff_format(data) {
         Some(format)
     } else if matches!(Format::from_extension(path), Some(Format::Svg))
@@ -215,7 +200,6 @@ fn main() -> ExitCode {
                 width: args.width,
                 height: args.height,
                 quality: args.quality,
-                lossless: args.lossless,
                 zopfli_iterations: args.zopfli_iterations,
             };
             match convert::convert(&args.input, &args.output, &settings) {
