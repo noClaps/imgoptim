@@ -137,8 +137,6 @@ fn optimise(path: &Path, output: &Path, settings: &Settings) -> Result<Outcome, 
     Ok(Outcome::Optimised { before, after })
 }
 
-/// Print how optimising an image went: its sizes to stdout, or its error to stderr. Returns
-/// whether it succeeded.
 /// Totals across all the images, for the summary.
 #[derive(Clone, Copy, Default)]
 struct Tally {
