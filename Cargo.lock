@@ -731,6 +731,7 @@ dependencies = [
  "oxipng",
  "oxvg_ast",
  "oxvg_optimiser",
+ "rayon",
 ]
 
 [[package]]

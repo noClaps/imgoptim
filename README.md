@@ -28,7 +28,8 @@ Files are only rewritten when they get smaller, and the images stay the same:
 - **SVG**: minified like SVGO, but with numbers kept to 5 decimal places, so rendering doesn't
   visibly change.
 
-Each file prints its size before and after. PNGs are slow, around a minute for an 800×800 photo;
-use `-i` to set fewer Zopfli iterations (default 15) and trade size for speed.
+Files are optimised in parallel, and each prints its size before and after, in the order given.
+PNGs are slow, around a minute for an 800×800 photo; use `-i` to set fewer Zopfli iterations
+(default 15) and trade size for speed.
 
 Run `imgoptim --help` for every option.

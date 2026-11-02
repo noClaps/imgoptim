@@ -1,10 +1,15 @@
 use std::{
-    fs::{DirEntry, create_dir_all, read, read_dir, write},
+    collections::{BTreeMap, HashSet},
+    fs::{DirEntry, canonicalize, create_dir_all, read, read_dir, write},
     io::{self, Write},
     num::NonZeroU64,
     path::{Path, PathBuf},
     process::ExitCode,
+    sync::mpsc,
+    thread,
 };
+
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 
 use crate::{Args, Format, detect, jpeg, png, svg};
 
@@ -24,7 +29,13 @@ fn find_images(dir: &Path, images: &mut Vec<PathBuf>) -> io::Result<()> {
     Ok(())
 }
 
-fn optimise(path: &Path, output: &Path, zopfli_iterations: NonZeroU64) -> Result<(), String> {
+/// An image's size in bytes before and after optimising.
+struct Sizes {
+    before: usize,
+    after: usize,
+}
+
+fn optimise(path: &Path, output: &Path, zopfli_iterations: NonZeroU64) -> Result<Sizes, String> {
     let data = read(path).map_err(|e| e.to_string())?;
     let optimised = match detect(path, &data) {
         Some(Format::Png) => png::optimise(&data, zopfli_iterations)?,
@@ -49,18 +60,33 @@ fn optimise(path: &Path, output: &Path, zopfli_iterations: NonZeroU64) -> Result
     if after < before || output != path {
         write(output, &result).map_err(|e| e.to_string())?;
     }
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "f64 holds file sizes exactly up to 8 PiB, and only two decimals are shown"
-    )]
-    let change = (after as f64 - before as f64) / before as f64 * 100.0;
-    // Ignore failures, e.g. when piped into `head`, so the remaining images still get optimised.
-    let _ = writeln!(
-        io::stdout(),
-        "{}: {before} → {after} bytes ({change:.2}%)",
-        path.display(),
-    );
-    Ok(())
+    Ok(Sizes { before, after })
+}
+
+/// Print how optimising an image went: its sizes to stdout, or its error to stderr. Returns
+/// whether it succeeded.
+fn report(path: &Path, result: Result<Sizes, String>) -> bool {
+    match result {
+        Ok(Sizes { before, after }) => {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "f64 holds file sizes exactly up to 8 PiB, and only two decimals are shown"
+            )]
+            let change = (after as f64 - before as f64) / before as f64 * 100.0;
+            // Ignore failures, e.g. when piped into `head`, so the remaining images still get
+            // optimised.
+            let _ = writeln!(
+                io::stdout(),
+                "{}: {before} → {after} bytes ({change:.2}%)",
+                path.display(),
+            );
+            true
+        }
+        Err(e) => {
+            eprintln!("{}: {e}", path.display());
+            false
+        }
+    }
 }
 
 pub fn run(args: &Args) -> ExitCode {
@@ -107,11 +133,38 @@ pub fn run(args: &Args) -> ExitCode {
         }));
     }
 
-    for (path, output) in &images {
-        if let Err(e) = optimise(path, output, args.zopfli_iterations) {
-            eprintln!("{}: {e}", path.display());
-            status = ExitCode::FAILURE;
+    // The same file named twice, or inside a directory also given, would be written by two
+    // threads at once.
+    let mut seen = HashSet::new();
+    images.retain(|(path, _)| seen.insert(canonicalize(path).unwrap_or_else(|_| path.clone())));
+
+    // Optimise the images in parallel, sharing oxipng's thread pool, and report them in order:
+    // each as soon as every image before it has finished.
+    let (sender, receiver) = mpsc::channel();
+    let images = &images;
+    thread::scope(|scope| {
+        scope.spawn(move || {
+            images.par_iter().enumerate().for_each_with(
+                sender,
+                |sender, (index, (path, output))| {
+                    let result = optimise(path, output, args.zopfli_iterations);
+                    // The receiver only disappears if reporting panicked.
+                    let _ = sender.send((index, result));
+                },
+            );
+        });
+
+        let mut finished = BTreeMap::new();
+        let mut next = 0;
+        for (index, result) in receiver {
+            finished.insert(index, result);
+            while let Some(result) = finished.remove(&next) {
+                if !report(&images[next].0, result) {
+                    status = ExitCode::FAILURE;
+                }
+                next += 1;
+            }
         }
-    }
+    });
     status
 }

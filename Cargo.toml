@@ -9,6 +9,7 @@ mozjpeg-sys = "2"
 oxipng = { version = "10.2.1", default-features = false, features = ["parallel", "zopfli"] }
 oxvg_ast = { version = "0.0.9", features = ["roxmltree"] }
 oxvg_optimiser = "0.0.9"
+rayon = "1.12"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
