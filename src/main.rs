@@ -34,6 +34,10 @@ struct Args {
     #[argp(switch, short = 'r')]
     recursive: bool,
 
+    /// Report how much each image would shrink, without changing any files.
+    #[argp(switch, short = 'n')]
+    dry_run: bool,
+
     /// Optimise every image, even ones an earlier run already optimised. Normally those are
     /// remembered in ~/.cache/imgoptim and skipped.
     #[argp(switch)]

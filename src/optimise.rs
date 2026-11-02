@@ -80,23 +80,27 @@ enum Outcome {
     Cached { size: usize },
 }
 
-fn optimise(
-    path: &Path,
-    output: &Path,
+/// How to optimise each image.
+struct Settings {
     zopfli_iterations: NonZeroU64,
-    cache: Option<&Cache>,
-) -> Result<Outcome, String> {
+    /// Report what would happen without writing any images or cache entries.
+    dry_run: bool,
+    cache: Option<Cache>,
+}
+
+fn optimise(path: &Path, output: &Path, settings: &Settings) -> Result<Outcome, String> {
     let data = read(path).map_err(|e| e.to_string())?;
     let format = detect(path, &data).ok_or("not a PNG, JPEG or SVG")?;
+    let cache = settings.cache.as_ref();
     if cache.is_some_and(|cache| cache.contains(format, &data)) {
-        if output != path {
+        if output != path && !settings.dry_run {
             write_atomically(output, &data, path).map_err(|e| e.to_string())?;
         }
         return Ok(Outcome::Cached { size: data.len() });
     }
 
     let optimised = match format {
-        Format::Png => png::optimise(&data, zopfli_iterations)?,
+        Format::Png => png::optimise(&data, settings.zopfli_iterations)?,
         Format::Jpeg => jpeg::optimise(&data)?,
         Format::Svg => svg::optimise(&data, path)?,
     };
@@ -121,6 +125,9 @@ fn optimise(
     };
     let after = result.len();
 
+    if settings.dry_run {
+        return Ok(Outcome::Optimised { before, after });
+    }
     if after < before || output != path {
         write_atomically(output, &result, path).map_err(|e| e.to_string())?;
     }
@@ -225,8 +232,8 @@ fn report(path: &Path, result: Result<Outcome, String>) -> Tally {
 }
 
 /// One line totalling the run, e.g. "12 images: 9 optimised, 2 already optimal, 1 failed. Saved
-/// 1.4 MB of 3.2 MB (-43.75%)."
-fn summary(tally: Tally) -> String {
+/// 1.4 MB of 3.2 MB (-43.75%)." A dry run says what would have been saved.
+fn summary(tally: Tally, dry_run: bool) -> String {
     let images = tally.optimised + tally.unchanged + tally.cached + tally.failed;
     let mut counts = vec![format!("{} optimised", tally.optimised)];
     if tally.unchanged > 0 {
@@ -239,9 +246,10 @@ fn summary(tally: Tally) -> String {
         counts.push(format!("{} failed", tally.failed));
     }
     format!(
-        "{images} image{}: {}. Saved {} of {} ({:.2}%).",
+        "{images} image{}: {}. {} {} of {} ({:.2}%).",
         if images == 1 { "" } else { "s" },
         counts.join(", "),
+        if dry_run { "Would save" } else { "Saved" },
         readable_size(tally.before.saturating_sub(tally.after)),
         readable_size(tally.before),
         change(tally.before, tally.after),
@@ -297,12 +305,16 @@ pub fn run(args: &Args) -> ExitCode {
     let mut seen = HashSet::new();
     images.retain(|(path, _)| seen.insert(canonicalize(path).unwrap_or_else(|_| path.clone())));
 
-    let cache = if args.no_cache {
-        None
-    } else {
-        Cache::open(args.zopfli_iterations)
-            .inspect_err(|e| eprintln!("Not using the cache: {e}"))
-            .ok()
+    let settings = Settings {
+        zopfli_iterations: args.zopfli_iterations,
+        dry_run: args.dry_run,
+        cache: if args.no_cache {
+            None
+        } else {
+            Cache::open(args.zopfli_iterations)
+                .inspect_err(|e| eprintln!("Not using the cache: {e}"))
+                .ok()
+        },
     };
 
     // Optimise the images in parallel, sharing oxipng's thread pool, reporting each as soon as
@@ -310,7 +322,7 @@ pub fn run(args: &Args) -> ExitCode {
     let tally = images
         .par_iter()
         .map(|(path, output)| {
-            let result = optimise(path, output, args.zopfli_iterations, cache.as_ref());
+            let result = optimise(path, output, &settings);
             report(path, result)
         })
         .reduce(Tally::default, Tally::add);
@@ -318,9 +330,9 @@ pub fn run(args: &Args) -> ExitCode {
         status = ExitCode::FAILURE;
     }
     if !images.is_empty() {
-        let _ = writeln!(io::stdout(), "{}", summary(tally));
+        let _ = writeln!(io::stdout(), "{}", summary(tally, args.dry_run));
     }
-    if let Some(cache) = &cache
+    if let Some(cache) = &settings.cache
         && let Err(e) = cache.save()
     {
         eprintln!("Couldn't update the cache: {e}");
@@ -390,9 +402,10 @@ mod tests {
             after: 1_800_000,
         };
         assert_eq!(
-            summary(tally),
+            summary(tally, false),
             "12 images: 9 optimised, 2 already optimal, 1 failed. Saved 1.4 MB of 3.2 MB (-43.75%)."
         );
+        assert!(summary(tally, true).contains(". Would save 1.4 MB of 3.2 MB"));
         let one = Tally {
             cached: 1,
             before: 500,
@@ -400,7 +413,7 @@ mod tests {
             ..Tally::default()
         };
         assert_eq!(
-            summary(one),
+            summary(one, false),
             "1 image: 0 optimised, 1 skipped as already optimised. Saved 0 bytes of 500 bytes (0.00%)."
         );
     }
