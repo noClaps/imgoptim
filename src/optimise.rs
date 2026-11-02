@@ -5,7 +5,6 @@ use std::{
         rename, write,
     },
     io::{self, Write},
-    num::NonZeroU64,
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -80,27 +79,23 @@ enum Outcome {
     Cached { size: usize },
 }
 
-/// How to optimise each image.
-struct Settings {
-    zopfli_iterations: NonZeroU64,
-    /// Report what would happen without writing any images or cache entries.
-    dry_run: bool,
-    cache: Option<Cache>,
-}
-
-fn optimise(path: &Path, output: &Path, settings: &Settings) -> Result<Outcome, String> {
+fn optimise(
+    path: &Path,
+    output: &Path,
+    args: &Args,
+    cache: Option<&Cache>,
+) -> Result<Outcome, String> {
     let data = read(path).map_err(|e| e.to_string())?;
     let format = detect(path, &data).ok_or("not a PNG, JPEG or SVG")?;
-    let cache = settings.cache.as_ref();
     if cache.is_some_and(|cache| cache.contains(format, &data)) {
-        if output != path && !settings.dry_run {
+        if output != path && !args.dry_run {
             write_atomically(output, &data, path).map_err(|e| e.to_string())?;
         }
         return Ok(Outcome::Cached { size: data.len() });
     }
 
     let optimised = match format {
-        Format::Png => png::optimise(&data, settings.zopfli_iterations)?,
+        Format::Png => png::optimise(&data, args.zopfli_iterations)?,
         Format::Jpeg => jpeg::optimise(&data)?,
         Format::Svg => svg::optimise(&data, path)?,
     };
@@ -125,7 +120,7 @@ fn optimise(path: &Path, output: &Path, settings: &Settings) -> Result<Outcome, 
     };
     let after = result.len();
 
-    if settings.dry_run {
+    if args.dry_run {
         return Ok(Outcome::Optimised { before, after });
     }
     if after < before || output != path {
@@ -303,16 +298,12 @@ pub fn run(args: &Args) -> ExitCode {
     let mut seen = HashSet::new();
     images.retain(|(path, _)| seen.insert(canonicalize(path).unwrap_or_else(|_| path.clone())));
 
-    let settings = Settings {
-        zopfli_iterations: args.zopfli_iterations,
-        dry_run: args.dry_run,
-        cache: if args.no_cache {
-            None
-        } else {
-            Cache::open(args.zopfli_iterations)
-                .inspect_err(|e| eprintln!("Not using the cache: {e}"))
-                .ok()
-        },
+    let cache = if args.no_cache {
+        None
+    } else {
+        Cache::open(args.zopfli_iterations)
+            .inspect_err(|e| eprintln!("Not using the cache: {e}"))
+            .ok()
     };
 
     // Optimise the images in parallel, sharing oxipng's thread pool, reporting each as soon as
@@ -320,7 +311,7 @@ pub fn run(args: &Args) -> ExitCode {
     let tally = images
         .par_iter()
         .map(|(path, output)| {
-            let result = optimise(path, output, &settings);
+            let result = optimise(path, output, args, cache.as_ref());
             report(path, result)
         })
         .reduce(Tally::default, Tally::add);
@@ -330,7 +321,7 @@ pub fn run(args: &Args) -> ExitCode {
     if !images.is_empty() {
         let _ = writeln!(io::stdout(), "{}", summary(tally, args.dry_run));
     }
-    if let Some(cache) = &settings.cache
+    if let Some(cache) = &cache
         && let Err(e) = cache.save()
     {
         eprintln!("Couldn't update the cache: {e}");
