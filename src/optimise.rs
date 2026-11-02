@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     fs::{
         DirEntry, OpenOptions, canonicalize, create_dir_all, metadata, read, read_dir, remove_file,
-        rename,
+        rename, write,
     },
     io::{self, Write},
     num::NonZeroU64,
@@ -33,9 +33,13 @@ fn find_images(dir: &Path, images: &mut Vec<PathBuf>) -> io::Result<()> {
 /// Replace `path` with `data` all at once: write a temporary file beside it, flush it to disk, then
 /// rename it into place. An interruption never leaves a partly written image. The new file keeps
 /// the permissions of the file it replaces, or of `like` when it's new, and a symlink's target is
-/// replaced rather than the link.
+/// replaced rather than the link. Outputs that aren't regular files, like `/dev/null` or a pipe,
+/// are written directly, since they can't be replaced.
 fn write_atomically(path: &Path, data: &[u8], like: &Path) -> io::Result<()> {
     let path = canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if metadata(&path).is_ok_and(|existing| !existing.is_file()) {
+        return write(&path, data);
+    }
     let directory = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -245,6 +249,11 @@ mod tests {
             metadata(&output).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn writes_to_special_files_directly() {
+        write_atomically(Path::new("/dev/null"), b"discarded", Path::new("/dev/null")).unwrap();
     }
 
     #[test]
