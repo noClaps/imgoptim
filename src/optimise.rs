@@ -349,13 +349,29 @@ mod tests {
 
     use super::*;
 
-    /// A new, empty directory for one test.
-    fn scratch(name: &str) -> PathBuf {
+    /// A temporary directory for one test, deleted afterwards.
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    fn scratch(name: &str) -> Scratch {
         let directory =
             std::env::temp_dir().join(format!("imgoptim-test-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         create_dir_all(&directory).unwrap();
-        directory
+        Scratch(directory)
     }
 
     #[test]
@@ -372,7 +388,7 @@ mod tests {
             0o640
         );
         // No temporary file is left behind.
-        assert_eq!(read_dir(&directory).unwrap().count(), 1);
+        assert_eq!(read_dir(&*directory).unwrap().count(), 1);
     }
 
     #[test]
