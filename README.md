@@ -24,6 +24,7 @@ Files are only rewritten when they get smaller, and the images stay the same:
 - **PNG**: identical pixels, including fully transparent ones; colour profile kept, other
   metadata removed.
 - **JPEG**: identical pixels; colour profile and orientation kept, other metadata removed.
+  Truncated or corrupt JPEGs are left unchanged.
 - **SVG**: minified like SVGO, but with numbers kept to 5 decimal places, so rendering doesn't
   visibly change.
 

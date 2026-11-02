@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 argp = "0.4.1"
-libc = "0.2.191"
 mozjpeg-sys = "2"
 oxipng = { version = "10.2.1", default-features = false, features = ["parallel", "zopfli"] }
 oxvg_ast = { version = "0.0.9", features = ["roxmltree"] }
@@ -13,6 +12,9 @@ oxvg_optimiser = "0.0.9"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
 
 [dev-dependencies]
 mozjpeg = "0.10"

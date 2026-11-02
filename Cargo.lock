@@ -726,7 +726,6 @@ name = "imgoptim"
 version = "0.1.0"
 dependencies = [
  "argp",
- "libc",
  "mozjpeg",
  "mozjpeg-sys",
  "oxipng",
