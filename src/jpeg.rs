@@ -304,10 +304,12 @@ impl Drop for Reader<'_> {
     }
 }
 
-/// A libjpeg compressor, destroyed when dropped, including when an error unwinds out of libjpeg.
+/// A libjpeg compressor writing to its own destination, destroyed when dropped, including when an
+/// error unwinds out of libjpeg.
 struct Writer {
     dst: Box<jpeg_compress_struct>,
     err: Box<jpeg_error_mgr>,
+    destination: Box<VecDestination>,
 }
 
 impl Writer {
@@ -317,28 +319,30 @@ impl Writer {
             // SAFETY: As for `jpeg_decompress_struct` in `Reader::new`.
             dst: Box::new(unsafe { mem::zeroed() }),
             err: error_manager(),
+            destination: VecDestination::new(),
         };
         writer.dst.common.err = &raw mut *writer.err;
         // SAFETY: The struct is zeroed apart from its error manager, which is what creating it
         // expects.
         unsafe { jpeg_create_compress(&raw mut *writer.dst) };
+        // Creating clears the destination, so it's set afterwards.
+        writer.dst.dest = &raw mut writer.destination.manager;
         writer
     }
 
     /// Write `reader`'s coefficients out as a new JPEG with `markers`, with progressive or
-    /// baseline scans. `destination` must outlive the writer, which keeps a pointer to it.
+    /// baseline scans.
     fn transcode(
         &mut self,
         reader: &Reader,
-        destination: &mut VecDestination,
         markers: &[(c_int, Vec<u8>)],
         progressive: bool,
     ) -> Vec<u8> {
         let dst = &mut *self.dst;
         // SAFETY: `reader` holds its coefficients until it's dropped, and `dst` is idle: newly
         // created, or finished by the previous call. That's what copying the parameters, setting
-        // scan options and writing coefficients need. The destination is a valid
-        // `jpeg_destination_mgr` that outlives `dst`'s use of it.
+        // scan options and writing coefficients need. The destination is boxed alongside `dst`,
+        // so it lives as long as `dst` does.
         unsafe {
             jpeg_copy_critical_parameters(&reader.src, dst);
             dst.optimize_coding = 1;
@@ -350,7 +354,6 @@ impl Writer {
                 dst.num_scans = 0;
                 dst.scan_info = ptr::null();
             }
-            dst.dest = &raw mut destination.manager;
             jpeg_write_coefficients(dst, reader.coefficients);
         }
         for (code, data) in markers {
@@ -361,14 +364,13 @@ impl Writer {
         }
         // SAFETY: `dst` is writing, so it can be finished.
         unsafe { jpeg_finish_compress(dst) };
-        mem::take(&mut destination.output)
+        mem::take(&mut self.destination.output)
     }
 }
 
 impl Drop for Writer {
     fn drop(&mut self) {
-        // SAFETY: As for `Reader`'s drop. Destroying doesn't touch the destination, which may
-        // already be gone.
+        // SAFETY: As for `Reader`'s drop.
         unsafe { jpeg_destroy_compress(&mut self.dst) };
     }
 }
@@ -380,10 +382,9 @@ pub fn optimise(data: &[u8]) -> Result<Vec<u8>, String> {
     catch(|| {
         let reader = Reader::new(data)?;
         let markers = reader.display_markers();
-        let mut destination = VecDestination::new();
         let mut writer = Writer::new();
-        let [progressive, baseline] = [true, false]
-            .map(|progressive| writer.transcode(&reader, &mut destination, &markers, progressive));
+        let [progressive, baseline] =
+            [true, false].map(|progressive| writer.transcode(&reader, &markers, progressive));
         Ok(if baseline.len() < progressive.len() {
             baseline
         } else {
