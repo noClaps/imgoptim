@@ -136,16 +136,14 @@ fn render(data: &[u8], directory: Option<&Path>) -> Result<Pixmap, String> {
     Ok(pixmap)
 }
 
-/// The largest difference in any channel of any pixel, or `None` if the sizes differ.
-fn largest_difference(a: &Pixmap, b: &Pixmap) -> Option<u8> {
-    ((a.width(), a.height()) == (b.width(), b.height())).then(|| {
-        a.data()
+/// Whether two renders are the same size and no channel of any pixel differs by more than
+/// [`TOLERANCE`].
+fn renders_alike(a: &Pixmap, b: &Pixmap) -> bool {
+    (a.width(), a.height()) == (b.width(), b.height())
+        && a.data()
             .iter()
             .zip(b.data())
-            .map(|(a, b)| a.abs_diff(*b))
-            .max()
-            .unwrap_or(0)
-    })
+            .all(|(a, b)| a.abs_diff(*b) <= TOLERANCE)
 }
 
 /// Optimise an SVG document with numbers rounded as far as possible without changing how it
@@ -159,7 +157,7 @@ pub fn optimise(data: &[u8], path: &Path) -> Result<Vec<u8>, String> {
     for decimals in PRECISIONS {
         let candidate = optimise_with(source, decimals)?;
         let rendered = render(candidate.as_bytes(), path.parent())?;
-        if largest_difference(&reference, &rendered).is_some_and(|d| d <= TOLERANCE) {
+        if renders_alike(&reference, &rendered) {
             return Ok(candidate.into_bytes());
         }
     }
