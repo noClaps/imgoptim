@@ -9,7 +9,7 @@ blake3 = "1.8"
 mozjpeg-sys = "2"
 oxipng = { version = "10.2.1", default-features = false, features = ["parallel", "zopfli"] }
 oxvg_ast = { version = "0.0.9", features = ["roxmltree"] }
-oxvg_optimiser = "0.0.9"
+oxvg_optimiser = { version = "0.0.9", default-features = false }
 png = "0.18"
 rayon = "1.12"
 resvg = "0.49"
