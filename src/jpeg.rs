@@ -187,28 +187,22 @@ fn exif_orientation(exif: &[u8]) -> Option<u16> {
         b"II" => false,
         _ => return None,
     };
-    let u16_at = |offset: usize| {
-        let bytes = tiff.get(offset..offset + 2)?.try_into().ok()?;
+    // An unsigned integer `length` bytes long, in the EXIF data's byte order.
+    let read = |offset: usize, length: usize| {
+        let bytes = tiff.get(offset..offset + length)?;
+        let push = |value: usize, &byte: &u8| value << 8 | usize::from(byte);
         Some(if big_endian {
-            u16::from_be_bytes(bytes)
+            bytes.iter().fold(0, push)
         } else {
-            u16::from_le_bytes(bytes)
-        })
-    };
-    let u32_at = |offset: usize| {
-        let bytes = tiff.get(offset..offset + 4)?.try_into().ok()?;
-        Some(if big_endian {
-            u32::from_be_bytes(bytes)
-        } else {
-            u32::from_le_bytes(bytes)
+            bytes.iter().rev().fold(0, push)
         })
     };
 
-    let ifd = u32_at(4)? as usize;
-    (0..u16_at(ifd)? as usize)
+    let ifd = read(4, 4)?;
+    (0..read(ifd, 2)?)
         .map(|i| ifd + 2 + i * 12)
-        .find(|&entry| u16_at(entry) == Some(ORIENTATION_TAG))
-        .and_then(|entry| u16_at(entry + 8))
+        .find(|&entry| read(entry, 2) == Some(ORIENTATION_TAG.into()))
+        .and_then(|entry| u16::try_from(read(entry + 8, 2)?).ok())
         .filter(|orientation| (1..=8).contains(orientation))
 }
 
