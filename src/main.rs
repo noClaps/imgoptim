@@ -1,3 +1,4 @@
+mod cache;
 mod jpeg;
 mod optimise;
 mod png;
@@ -32,6 +33,11 @@ struct Args {
     /// Optimise every supported image in the given directories and their subdirectories.
     #[argp(switch, short = 'r')]
     recursive: bool,
+
+    /// Optimise every image, even ones an earlier run already optimised. Normally those are
+    /// remembered in ~/.cache/imgoptim and skipped.
+    #[argp(switch)]
+    no_cache: bool,
 
     /// Images, or directories with -r, to optimise.
     #[argp(positional)]

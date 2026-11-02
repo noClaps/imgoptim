@@ -12,7 +12,7 @@ use std::{
 
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
-use crate::{Args, Format, detect, jpeg, png, svg};
+use crate::{Args, Format, cache::Cache, detect, jpeg, png, svg};
 
 /// Collect every file under `dir` with a supported extension, in a stable order. Symlinked
 /// directories aren't followed, so links can't cause loops.
@@ -72,15 +72,29 @@ fn write_atomically(path: &Path, data: &[u8], like: &Path) -> io::Result<()> {
     written
 }
 
-/// An image's size in bytes before and after optimising.
-struct Sizes {
-    before: usize,
-    after: usize,
+/// What optimising an image did.
+enum Outcome {
+    /// It was optimised, or couldn't be improved: its sizes in bytes before and after.
+    Optimised { before: usize, after: usize },
+    /// An earlier run already optimised it, so it was skipped.
+    Cached,
 }
 
-fn optimise(path: &Path, output: &Path, zopfli_iterations: NonZeroU64) -> Result<Sizes, String> {
+fn optimise(
+    path: &Path,
+    output: &Path,
+    zopfli_iterations: NonZeroU64,
+    cache: Option<&Cache>,
+) -> Result<Outcome, String> {
     let data = read(path).map_err(|e| e.to_string())?;
     let format = detect(path, &data).ok_or("not a PNG, JPEG or SVG")?;
+    if cache.is_some_and(|cache| cache.contains(format, &data)) {
+        if output != path {
+            write_atomically(output, &data, path).map_err(|e| e.to_string())?;
+        }
+        return Ok(Outcome::Cached);
+    }
+
     let optimised = match format {
         Format::Png => png::optimise(&data, zopfli_iterations)?,
         Format::Jpeg => jpeg::optimise(&data)?,
@@ -110,14 +124,21 @@ fn optimise(path: &Path, output: &Path, zopfli_iterations: NonZeroU64) -> Result
     if after < before || output != path {
         write_atomically(output, &result, path).map_err(|e| e.to_string())?;
     }
-    Ok(Sizes { before, after })
+    if let Some(cache) = cache {
+        cache.insert(format, &result);
+    }
+    Ok(Outcome::Optimised { before, after })
 }
 
 /// Print how optimising an image went: its sizes to stdout, or its error to stderr. Returns
 /// whether it succeeded.
-fn report(path: &Path, result: Result<Sizes, String>) -> bool {
+fn report(path: &Path, result: Result<Outcome, String>) -> bool {
     match result {
-        Ok(Sizes { before, after }) => {
+        Ok(Outcome::Cached) => {
+            let _ = writeln!(io::stdout(), "{}: already optimised", path.display());
+            true
+        }
+        Ok(Outcome::Optimised { before, after }) => {
             #[expect(
                 clippy::cast_precision_loss,
                 reason = "f64 holds file sizes exactly up to 8 PiB, and only two decimals are shown"
@@ -188,15 +209,31 @@ pub fn run(args: &Args) -> ExitCode {
     let mut seen = HashSet::new();
     images.retain(|(path, _)| seen.insert(canonicalize(path).unwrap_or_else(|_| path.clone())));
 
+    let cache = if args.no_cache {
+        None
+    } else {
+        Cache::open(args.zopfli_iterations)
+            .inspect_err(|e| eprintln!("Not using the cache: {e}"))
+            .ok()
+    };
+
     // Optimise the images in parallel, sharing oxipng's thread pool, reporting each as soon as
     // it's done. Each report is one locked write, so lines don't interleave.
     let failures = images
         .par_iter()
-        .map(|(path, output)| report(path, optimise(path, output, args.zopfli_iterations)))
+        .map(|(path, output)| {
+            let result = optimise(path, output, args.zopfli_iterations, cache.as_ref());
+            report(path, result)
+        })
         .filter(|&succeeded| !succeeded)
         .count();
     if failures > 0 {
         status = ExitCode::FAILURE;
+    }
+    if let Some(cache) = &cache
+        && let Err(e) = cache.save()
+    {
+        eprintln!("Couldn't update the cache: {e}");
     }
     status
 }
