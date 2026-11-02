@@ -1,15 +1,13 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::HashSet,
     fs::{DirEntry, canonicalize, create_dir_all, read, read_dir, write},
     io::{self, Write},
     num::NonZeroU64,
     path::{Path, PathBuf},
     process::ExitCode,
-    sync::mpsc,
-    thread,
 };
 
-use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::{Args, Format, detect, jpeg, png, svg};
 
@@ -138,33 +136,15 @@ pub fn run(args: &Args) -> ExitCode {
     let mut seen = HashSet::new();
     images.retain(|(path, _)| seen.insert(canonicalize(path).unwrap_or_else(|_| path.clone())));
 
-    // Optimise the images in parallel, sharing oxipng's thread pool, and report them in order:
-    // each as soon as every image before it has finished.
-    let (sender, receiver) = mpsc::channel();
-    let images = &images;
-    thread::scope(|scope| {
-        scope.spawn(move || {
-            images.par_iter().enumerate().for_each_with(
-                sender,
-                |sender, (index, (path, output))| {
-                    let result = optimise(path, output, args.zopfli_iterations);
-                    // The receiver only disappears if reporting panicked.
-                    let _ = sender.send((index, result));
-                },
-            );
-        });
-
-        let mut finished = BTreeMap::new();
-        let mut next = 0;
-        for (index, result) in receiver {
-            finished.insert(index, result);
-            while let Some(result) = finished.remove(&next) {
-                if !report(&images[next].0, result) {
-                    status = ExitCode::FAILURE;
-                }
-                next += 1;
-            }
-        }
-    });
+    // Optimise the images in parallel, sharing oxipng's thread pool, reporting each as soon as
+    // it's done. Each report is one locked write, so lines don't interleave.
+    let failures = images
+        .par_iter()
+        .map(|(path, output)| report(path, optimise(path, output, args.zopfli_iterations)))
+        .filter(|&succeeded| !succeeded)
+        .count();
+    if failures > 0 {
+        status = ExitCode::FAILURE;
+    }
     status
 }
