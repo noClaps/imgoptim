@@ -1,6 +1,9 @@
 use std::{
     collections::HashSet,
-    fs::{DirEntry, canonicalize, create_dir_all, read, read_dir, write},
+    fs::{
+        DirEntry, OpenOptions, canonicalize, create_dir_all, metadata, read, read_dir, remove_file,
+        rename,
+    },
     io::{self, Write},
     num::NonZeroU64,
     path::{Path, PathBuf},
@@ -27,6 +30,44 @@ fn find_images(dir: &Path, images: &mut Vec<PathBuf>) -> io::Result<()> {
     Ok(())
 }
 
+/// Replace `path` with `data` all at once: write a temporary file beside it, flush it to disk, then
+/// rename it into place. An interruption never leaves a partly written image. The new file keeps
+/// the permissions of the file it replaces, or of `like` when it's new, and a symlink's target is
+/// replaced rather than the link.
+fn write_atomically(path: &Path, data: &[u8], like: &Path) -> io::Result<()> {
+    let path = canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    create_dir_all(directory)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other("the output path has no file name"))?;
+    let temporary = directory.join(format!(
+        ".{}.imgoptim-{}",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let permissions = metadata(&path).or_else(|_| metadata(like))?.permissions();
+
+    let written = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&temporary)?;
+        file.write_all(data)?;
+        file.set_permissions(permissions)?;
+        file.sync_all()?;
+        rename(&temporary, &path)
+    })();
+    if written.is_err() {
+        let _ = remove_file(&temporary);
+    }
+    written
+}
+
 /// An image's size in bytes before and after optimising.
 struct Sizes {
     before: usize,
@@ -50,13 +91,8 @@ fn optimise(path: &Path, output: &Path, zopfli_iterations: NonZeroU64) -> Result
     };
     let after = result.len();
 
-    if output != path
-        && let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty())
-    {
-        create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
     if after < before || output != path {
-        write(output, &result).map_err(|e| e.to_string())?;
+        write_atomically(output, &result, path).map_err(|e| e.to_string())?;
     }
     Ok(Sizes { before, after })
 }
@@ -147,4 +183,74 @@ pub fn run(args: &Args) -> ExitCode {
         status = ExitCode::FAILURE;
     }
     status
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs::{self, Permissions},
+        os::unix::fs::{PermissionsExt, symlink},
+    };
+
+    use super::*;
+
+    /// A new, empty directory for one test.
+    fn scratch(name: &str) -> PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("imgoptim-test-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    #[test]
+    fn replaces_contents_and_keeps_permissions() {
+        let directory = scratch("atomic");
+        let image = directory.join("image.png");
+        fs::write(&image, b"old").unwrap();
+        fs::set_permissions(&image, Permissions::from_mode(0o640)).unwrap();
+
+        write_atomically(&image, b"new", &image).unwrap();
+        assert_eq!(fs::read(&image).unwrap(), b"new");
+        assert_eq!(
+            metadata(&image).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        // No temporary file is left behind.
+        assert_eq!(read_dir(&directory).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn creates_missing_directories_with_the_inputs_permissions() {
+        let directory = scratch("atomic-new");
+        let input = directory.join("input.png");
+        fs::write(&input, b"input").unwrap();
+        fs::set_permissions(&input, Permissions::from_mode(0o600)).unwrap();
+
+        let output = directory.join("nested/output.png");
+        write_atomically(&output, b"output", &input).unwrap();
+        assert_eq!(fs::read(&output).unwrap(), b"output");
+        assert_eq!(
+            metadata(&output).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn writes_through_symlinks() {
+        let directory = scratch("atomic-link");
+        let target = directory.join("target.png");
+        let link = directory.join("link.png");
+        fs::write(&target, b"old").unwrap();
+        symlink(&target, &link).unwrap();
+
+        write_atomically(&link, b"new", &link).unwrap();
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+    }
 }
