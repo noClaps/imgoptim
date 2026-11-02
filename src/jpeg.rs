@@ -1,5 +1,6 @@
 use std::{
     ffi::{CStr, c_int, c_uint},
+    marker::PhantomData,
     mem,
     panic::{self, AssertUnwindSafe},
     ptr::{self, addr_of_mut},
@@ -10,10 +11,9 @@ use mozjpeg_sys::{
     J_BOOLEAN_PARAM, J_COLOR_SPACE, JCOEF, boolean, jpeg_c_set_bool_param, jpeg_common_struct,
     jpeg_compress_struct, jpeg_copy_critical_parameters, jpeg_create_compress,
     jpeg_create_decompress, jpeg_decompress_struct, jpeg_destination_mgr, jpeg_destroy_compress,
-    jpeg_destroy_decompress, jpeg_error_mgr, jpeg_finish_compress, jpeg_finish_decompress,
-    jpeg_mem_src, jpeg_read_coefficients, jpeg_read_header, jpeg_save_markers,
-    jpeg_simple_progression, jpeg_std_error, jpeg_write_coefficients, jpeg_write_marker,
-    jvirt_barray_control,
+    jpeg_destroy_decompress, jpeg_error_mgr, jpeg_finish_compress, jpeg_mem_src,
+    jpeg_read_coefficients, jpeg_read_header, jpeg_save_markers, jpeg_simple_progression,
+    jpeg_std_error, jpeg_write_coefficients, jpeg_write_marker, jvirt_barray_control,
 };
 
 const APP1: c_int = 0xE1;
@@ -74,7 +74,7 @@ fn error_manager() -> Box<jpeg_error_mgr> {
 ///
 /// Unwinding out of libjpeg is defined because mozjpeg-sys compiles it with `-fexceptions` (its
 /// `unwinding` feature) and declares its functions with the C-unwind ABI. After an error, the
-/// libjpeg structs may only be destroyed, which is all the callers do.
+/// libjpeg structs may only be destroyed, which [`Reader`] and [`Writer`] do when dropped.
 fn catch<T>(f: impl FnOnce() -> T) -> Result<T, String> {
     panic::catch_unwind(AssertUnwindSafe(f)).map_err(|e| {
         e.downcast::<String>()
@@ -225,155 +225,171 @@ fn minimal_exif(orientation: u16) -> Vec<u8> {
     exif
 }
 
-/// Keep only the markers that change how the image is displayed: the ICC profile, and the EXIF
-/// orientation when it isn't the default.
-///
-/// # Safety
-///
-/// `src` must have read its header with `jpeg_save_markers` set up, and not have been finished,
-/// so that `marker_list` is a valid list.
-unsafe fn display_markers(src: &jpeg_decompress_struct) -> Vec<(c_int, Vec<u8>)> {
-    let mut markers = Vec::new();
-    let mut marker = src.marker_list;
-    // SAFETY: The caller guarantees the list is valid: each node is null or a live marker.
-    while let Some(m) = unsafe { marker.as_ref() } {
-        // SAFETY: libjpeg allocates each saved marker's data right after its node, so `data` is
-        // never null, and `data_length` bytes of it are initialised.
-        let data = unsafe { slice::from_raw_parts(m.data, m.data_length as usize) };
-        match c_int::from(m.marker) {
-            APP2 if data.starts_with(ICC_SIGNATURE) => markers.push((APP2, data.to_vec())),
-            APP1 => {
-                if let Some(orientation) = exif_orientation(data).filter(|&o| o != 1) {
-                    markers.push((APP1, minimal_exif(orientation)));
-                }
-            }
-            _ => {}
-        }
-        marker = m.next;
-    }
-    // The EXIF marker conventionally comes first.
-    markers.sort_by_key(|&(code, _)| code);
-    markers
+/// A libjpeg decompressor that has read a JPEG's DCT coefficients. It's destroyed when dropped,
+/// including when an error unwinds out of libjpeg, and borrows the data it reads from.
+struct Reader<'data> {
+    src: Box<jpeg_decompress_struct>,
+    err: Box<jpeg_error_mgr>,
+    coefficients: *mut *mut jvirt_barray_control,
+    data: PhantomData<&'data [u8]>,
 }
 
-/// Write `coefficients` out as a new JPEG through `dst`.
-///
-/// # Safety
-///
-/// - `src` must have read `coefficients` with `jpeg_read_coefficients`, and not been finished.
-/// - `dst` must be created and idle: newly created or finished.
-/// - `destination` must outlive any use of `dst`, which keeps a pointer to it.
-unsafe fn transcode(
-    src: &jpeg_decompress_struct,
-    dst: &mut jpeg_compress_struct,
-    destination: &mut VecDestination,
-    coefficients: *mut *mut jvirt_barray_control,
-    markers: &[(c_int, Vec<u8>)],
-    progressive: bool,
-) -> Vec<u8> {
-    // SAFETY: The caller guarantees `src` holds the coefficients and `dst` is idle, which is
-    // what copying the parameters, setting scan options and writing coefficients need. The
-    // destination is a valid `jpeg_destination_mgr` that outlives `dst`'s use of it.
-    unsafe {
-        jpeg_copy_critical_parameters(src, dst);
-        dst.optimize_coding = 1;
-        if progressive {
-            jpeg_c_set_bool_param(dst, J_BOOLEAN_PARAM::JBOOLEAN_OPTIMIZE_SCANS, 1);
-            jpeg_simple_progression(dst);
-        } else {
-            jpeg_c_set_bool_param(dst, J_BOOLEAN_PARAM::JBOOLEAN_OPTIMIZE_SCANS, 0);
-            dst.num_scans = 0;
-            dst.scan_info = ptr::null();
+impl<'data> Reader<'data> {
+    /// Read a JPEG's header, saved markers and DCT coefficients. Must run inside [`catch`].
+    /// libjpeg only warns about truncated or corrupt data, patching over it, so that's refused:
+    /// re-encoding it would turn a damaged image into a different, complete one.
+    fn new(data: &'data [u8]) -> Result<Self, String> {
+        let mut reader = Self {
+            // SAFETY: Every field of `jpeg_decompress_struct` is an integer, raw pointer, array,
+            // `Option` of a function pointer, or an enum with a zero variant, so all zeroes is a
+            // valid value. It's boxed so the pointers libjpeg keeps to it stay valid.
+            src: Box::new(unsafe { mem::zeroed() }),
+            err: error_manager(),
+            coefficients: ptr::null_mut(),
+            data: PhantomData,
+        };
+        reader.src.common.err = &raw mut *reader.err;
+        // SAFETY: The struct is zeroed apart from its error manager, which is what creating it
+        // expects. `data` outlives `src`'s use of it, which ends when `src` is destroyed on drop.
+        // Markers are saved before the header is read.
+        unsafe {
+            jpeg_create_decompress(&raw mut *reader.src);
+            jpeg_mem_src(&mut reader.src, data.as_ptr(), data.len() as _);
+            jpeg_save_markers(&mut reader.src, APP1, 0xFFFF);
+            jpeg_save_markers(&mut reader.src, APP2, 0xFFFF);
+            jpeg_read_header(&mut reader.src, 1);
+            reader.coefficients = jpeg_read_coefficients(&mut reader.src);
         }
-        dst.dest = &raw mut destination.manager;
-        jpeg_write_coefficients(dst, coefficients);
+        // A memory source never suspends, so this only happens if libjpeg changes.
+        assert!(!reader.coefficients.is_null(), "libjpeg suspended reading");
+        if reader.err.num_warnings > 0 {
+            return Err("the JPEG is truncated or corrupt".to_owned());
+        }
+        Ok(reader)
     }
-    for (code, data) in markers {
-        let length = c_uint::try_from(data.len()).expect("JPEG markers are under 64 KiB");
-        // SAFETY: `dst` is writing, after the coefficients and before finishing, when markers
-        // may be added, and `data` is valid for `length` bytes.
-        unsafe { jpeg_write_marker(dst, *code, data.as_ptr(), length) };
+
+    /// Keep only the markers that change how the image is displayed: the ICC profile, and the
+    /// EXIF orientation when it isn't the default.
+    fn display_markers(&self) -> Vec<(c_int, Vec<u8>)> {
+        let mut markers = Vec::new();
+        let mut marker = self.src.marker_list;
+        // SAFETY: The header was read with markers saved, so the list is valid until `src` is
+        // destroyed: each node is null or a live marker.
+        while let Some(m) = unsafe { marker.as_ref() } {
+            // SAFETY: libjpeg allocates each saved marker's data right after its node, so `data`
+            // is never null, and `data_length` bytes of it are initialised.
+            let data = unsafe { slice::from_raw_parts(m.data, m.data_length as usize) };
+            match c_int::from(m.marker) {
+                APP2 if data.starts_with(ICC_SIGNATURE) => markers.push((APP2, data.to_vec())),
+                APP1 => {
+                    if let Some(orientation) = exif_orientation(data).filter(|&o| o != 1) {
+                        markers.push((APP1, minimal_exif(orientation)));
+                    }
+                }
+                _ => {}
+            }
+            marker = m.next;
+        }
+        // The EXIF marker conventionally comes first.
+        markers.sort_by_key(|&(code, _)| code);
+        markers
     }
-    // SAFETY: `dst` is writing, so it can be finished.
-    unsafe { jpeg_finish_compress(dst) };
-    mem::take(&mut destination.output)
+}
+
+impl Drop for Reader<'_> {
+    fn drop(&mut self) {
+        // SAFETY: Destroying is valid in any state, including after an error unwound out of
+        // libjpeg, and nothing uses `src` afterwards.
+        unsafe { jpeg_destroy_decompress(&mut self.src) };
+    }
+}
+
+/// A libjpeg compressor, destroyed when dropped, including when an error unwinds out of libjpeg.
+struct Writer {
+    dst: Box<jpeg_compress_struct>,
+    err: Box<jpeg_error_mgr>,
+}
+
+impl Writer {
+    /// Must run inside [`catch`].
+    fn new() -> Self {
+        let mut writer = Self {
+            // SAFETY: As for `jpeg_decompress_struct` in `Reader::new`.
+            dst: Box::new(unsafe { mem::zeroed() }),
+            err: error_manager(),
+        };
+        writer.dst.common.err = &raw mut *writer.err;
+        // SAFETY: The struct is zeroed apart from its error manager, which is what creating it
+        // expects.
+        unsafe { jpeg_create_compress(&raw mut *writer.dst) };
+        writer
+    }
+
+    /// Write `reader`'s coefficients out as a new JPEG with `markers`, with progressive or
+    /// baseline scans. `destination` must outlive the writer, which keeps a pointer to it.
+    fn transcode(
+        &mut self,
+        reader: &Reader,
+        destination: &mut VecDestination,
+        markers: &[(c_int, Vec<u8>)],
+        progressive: bool,
+    ) -> Vec<u8> {
+        let dst = &mut *self.dst;
+        // SAFETY: `reader` holds its coefficients until it's dropped, and `dst` is idle: newly
+        // created, or finished by the previous call. That's what copying the parameters, setting
+        // scan options and writing coefficients need. The destination is a valid
+        // `jpeg_destination_mgr` that outlives `dst`'s use of it.
+        unsafe {
+            jpeg_copy_critical_parameters(&reader.src, dst);
+            dst.optimize_coding = 1;
+            if progressive {
+                jpeg_c_set_bool_param(dst, J_BOOLEAN_PARAM::JBOOLEAN_OPTIMIZE_SCANS, 1);
+                jpeg_simple_progression(dst);
+            } else {
+                jpeg_c_set_bool_param(dst, J_BOOLEAN_PARAM::JBOOLEAN_OPTIMIZE_SCANS, 0);
+                dst.num_scans = 0;
+                dst.scan_info = ptr::null();
+            }
+            dst.dest = &raw mut destination.manager;
+            jpeg_write_coefficients(dst, reader.coefficients);
+        }
+        for (code, data) in markers {
+            let length = c_uint::try_from(data.len()).expect("JPEG markers are under 64 KiB");
+            // SAFETY: `dst` is writing, after the coefficients and before finishing, when markers
+            // may be added, and `data` is valid for `length` bytes.
+            unsafe { jpeg_write_marker(dst, *code, data.as_ptr(), length) };
+        }
+        // SAFETY: `dst` is writing, so it can be finished.
+        unsafe { jpeg_finish_compress(dst) };
+        mem::take(&mut destination.output)
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        // SAFETY: As for `Reader`'s drop. Destroying doesn't touch the destination, which may
+        // already be gone.
+        unsafe { jpeg_destroy_compress(&mut self.dst) };
+    }
 }
 
 /// Losslessly re-encode a JPEG's DCT coefficients with optimised Huffman tables, trying both
-/// baseline and progressive scans and keeping whichever is smaller. Equivalent to mozjpeg's
+/// progressive and baseline scans and keeping whichever is smaller. Equivalent to mozjpeg's
 /// `jpegtran -copy none -optimize`, keeping the colour profile and orientation.
 pub fn optimise(data: &[u8]) -> Result<Vec<u8>, String> {
-    recompress(data, &[true, false])
-}
-
-/// Re-encode the DCT coefficients once per scan mode (`true` for progressive), returning the
-/// smallest result.
-fn recompress(data: &[u8], progressive_modes: &[bool]) -> Result<Vec<u8>, String> {
-    let mut err = error_manager();
-    // SAFETY: Every field of the libjpeg structs is an integer, raw pointer, array, `Option` of a
-    // function pointer, or an enum with a zero variant, so all zeroes is a valid value. They're
-    // boxed so the pointers libjpeg keeps to them stay valid.
-    let (mut src, mut dst): (Box<jpeg_decompress_struct>, Box<jpeg_compress_struct>) =
-        unsafe { (Box::new(mem::zeroed()), Box::new(mem::zeroed())) };
-    src.common.err = &raw mut *err;
-    dst.common.err = &raw mut *err;
-    let mut destination = VecDestination::new();
-
-    let result = catch(|| {
-        // SAFETY: The structs are zeroed apart from their error manager, which is what creating
-        // them expects. `data` outlives `src`'s use of it, which ends when `src` is destroyed
-        // below. Markers are saved before the header is read.
-        let coefficients = unsafe {
-            jpeg_create_decompress(&raw mut *src);
-            jpeg_create_compress(&raw mut *dst);
-            jpeg_mem_src(&mut src, data.as_ptr(), data.len() as _);
-            jpeg_save_markers(&mut src, APP1, 0xFFFF);
-            jpeg_save_markers(&mut src, APP2, 0xFFFF);
-            jpeg_read_header(&mut src, 1);
-            jpeg_read_coefficients(&mut src)
-        };
-        // A memory source never suspends, so this only happens if libjpeg changes.
-        assert!(!coefficients.is_null(), "libjpeg suspended reading");
-        // libjpeg only warns about truncated or corrupt data, patching over it. Re-encoding that
-        // would turn a damaged image into a different, complete one, so leave it alone.
-        if err.num_warnings > 0 {
-            return Err("the JPEG is truncated or corrupt".to_owned());
-        }
-        // SAFETY: `src` has read its header with markers saved and hasn't been finished.
-        let markers = unsafe { display_markers(&src) };
-
-        let smallest = progressive_modes
-            .iter()
-            .map(|&progressive| {
-                // SAFETY: `src` holds the coefficients until it's finished below, `dst` is idle
-                // (newly created, or finished by the previous transcode), and `destination`
-                // outlives `dst`.
-                unsafe {
-                    transcode(
-                        &src,
-                        &mut dst,
-                        &mut destination,
-                        coefficients,
-                        &markers,
-                        progressive,
-                    )
-                }
-            })
-            .min_by_key(Vec::len)
-            .expect("at least one scan mode");
-        // SAFETY: `src` has read the coefficients and nothing uses them after this.
-        unsafe { jpeg_finish_decompress(&mut src) };
-        Ok(smallest)
-    })
-    .and_then(|result| result);
-
-    // SAFETY: Destroying is valid in any state, including after an error unwound out of libjpeg,
-    // and nothing uses the structs afterwards.
-    unsafe {
-        jpeg_destroy_compress(&mut dst);
-        jpeg_destroy_decompress(&mut src);
-    }
-    result
+    catch(|| {
+        let reader = Reader::new(data)?;
+        let markers = reader.display_markers();
+        let mut destination = VecDestination::new();
+        let mut writer = Writer::new();
+        let [progressive, baseline] = [true, false]
+            .map(|progressive| writer.transcode(&reader, &mut destination, &markers, progressive));
+        Ok(if baseline.len() < progressive.len() {
+            baseline
+        } else {
+            progressive
+        })
+    })?
 }
 
 /// Everything that determines how a JPEG is displayed: its layout, the DCT coefficients and
@@ -396,44 +412,25 @@ struct Component {
 }
 
 fn decode(data: &[u8]) -> Result<Decoded, String> {
-    let mut err = error_manager();
-    // SAFETY: As in `recompress`: zeroed libjpeg structs are valid, and are boxed so the
-    // pointers libjpeg keeps to them stay valid.
-    let mut src: Box<jpeg_decompress_struct> = Box::new(unsafe { mem::zeroed() });
-    src.common.err = &raw mut *err;
-
-    let result = catch(|| {
-        // SAFETY: As in `recompress`: the struct is zeroed apart from its error manager, `data`
-        // outlives `src`'s use of it, and markers are saved before the header is read.
-        let arrays = unsafe {
-            jpeg_create_decompress(&raw mut *src);
-            jpeg_mem_src(&mut src, data.as_ptr(), data.len() as _);
-            jpeg_save_markers(&mut src, APP1, 0xFFFF);
-            jpeg_save_markers(&mut src, APP2, 0xFFFF);
-            jpeg_read_header(&mut src, 1);
-            jpeg_read_coefficients(&mut src)
-        };
-        assert!(!arrays.is_null(), "libjpeg suspended reading");
-        if err.num_warnings > 0 {
-            return Err("the JPEG is truncated or corrupt".to_owned());
-        }
-        // SAFETY: `src` has read its header with markers saved and hasn't been finished.
-        let markers = unsafe { display_markers(&src) };
+    catch(|| {
+        let mut reader = Reader::new(data)?;
+        let markers = reader.display_markers();
+        let src = &mut *reader.src;
         // SAFETY: After `jpeg_read_coefficients`, `common.mem` is libjpeg's memory manager.
         let access = unsafe { (*src.common.mem).access_virt_barray }
             .expect("libjpeg's memory manager can access coefficient arrays");
 
         let mut components = Vec::new();
         for c in 0..usize::try_from(src.num_components).expect("a positive component count") {
-            // SAFETY: `comp_info` has `num_components` entries, and `arrays` has one coefficient
-            // array per component. Each array row holds `width_in_blocks` blocks (rounded up),
-            // valid until `src` is finished, and each component's quantisation table is set
-            // once its coefficients are read.
+            // SAFETY: `comp_info` has `num_components` entries, and `coefficients` has one array
+            // per component. Each array row holds `width_in_blocks` blocks (rounded up), valid
+            // until `src` is destroyed, and each component's quantisation table is set once its
+            // coefficients are read.
             let component = unsafe {
                 let info = &*src.comp_info.add(c);
                 let mut coefficients = Vec::new();
                 for row in 0..info.height_in_blocks {
-                    let blocks = *access(&mut src.common, *arrays.add(c), row, 1, 0);
+                    let blocks = *access(&mut src.common, *reader.coefficients.add(c), row, 1, 0);
                     for block in slice::from_raw_parts(blocks, info.width_in_blocks as usize) {
                         coefficients.extend_from_slice(block);
                     }
@@ -448,22 +445,14 @@ fn decode(data: &[u8]) -> Result<Decoded, String> {
             components.push(component);
         }
 
-        let decoded = Decoded {
+        Ok(Decoded {
             width: src.image_width,
             height: src.image_height,
             colour_space: src.jpeg_color_space,
             components,
             markers,
-        };
-        // SAFETY: `src` has read its coefficients, and nothing uses them afterwards.
-        unsafe { jpeg_finish_decompress(&mut src) };
-        Ok(decoded)
-    })
-    .and_then(|result| result);
-
-    // SAFETY: Destroying is valid in any state, and nothing uses `src` afterwards.
-    unsafe { jpeg_destroy_decompress(&mut src) };
-    result
+        })
+    })?
 }
 
 /// Whether two JPEGs display identically: the same coefficients, quantisation tables, layout,
