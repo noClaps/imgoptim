@@ -84,7 +84,7 @@ fn optimise(path: &Path, output: &Path, zopfli_iterations: NonZeroU64) -> Result
     let optimised = match format {
         Format::Png => png::optimise(&data, zopfli_iterations)?,
         Format::Jpeg => jpeg::optimise(&data)?,
-        Format::Svg => svg::optimise(&data)?,
+        Format::Svg => svg::optimise(&data, path)?,
     };
 
     let before = data.len();

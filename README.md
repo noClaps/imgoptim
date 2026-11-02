@@ -25,8 +25,9 @@ Files are only rewritten when they get smaller, and the images stay the same:
   metadata removed.
 - **JPEG**: identical pixels; colour profile and orientation kept, other metadata removed.
   Truncated or corrupt JPEGs are left unchanged.
-- **SVG**: minified like SVGO, but with numbers kept to 5 decimal places, so rendering doesn't
-  visibly change.
+- **SVG**: minified like SVGO, with numbers rounded to 3, 4 or 5 decimal places, whichever is
+  the shortest that renders the same as the original. SVGs that would visibly change are left
+  unchanged.
 
 Files are optimised in parallel, and each prints its size before and after as it finishes.
 PNGs are slow, around a minute for an 800×800 photo; use `-i` to set fewer Zopfli iterations
