@@ -109,9 +109,23 @@ fn fonts() -> Arc<fontdb::Database> {
 /// sub-pixel shifts in small icons.
 const RENDER_SIZE: f32 = 1024.0;
 
+/// How many pixels across each compared pixel is rendered from. resvg draws curves as lines up to
+/// a quarter of a pixel away, and differently for quadratic and cubic curves, so an optimised
+/// path with the same shape can render up to 64/255 differently. Averaging 4×4 pixels brings that
+/// within [`TOLERANCE`], while real changes in shape stay as large.
+const SUPERSAMPLING: usize = 4;
+
+/// An SVG rendered for comparison: each channel of each pixel is the sum of that channel over
+/// [`SUPERSAMPLING`]² rendered pixels.
+struct Render {
+    width: usize,
+    height: usize,
+    sums: Vec<u16>,
+}
+
 /// Render an SVG with its longest side [`RENDER_SIZE`] pixels long, resolving linked files
 /// relative to `directory`.
-fn render(data: &[u8], directory: Option<&Path>) -> Result<Pixmap, String> {
+fn render(data: &[u8], directory: Option<&Path>) -> Result<Render, String> {
     let options = usvg::Options {
         resources_dir: directory.map(Path::to_path_buf),
         fontdb: fonts(),
@@ -125,25 +139,51 @@ fn render(data: &[u8], directory: Option<&Path>) -> Result<Pixmap, String> {
         clippy::cast_sign_loss,
         reason = "the result is between 1 and RENDER_SIZE"
     )]
-    let pixels = |length: f32| (length * scale).ceil().max(1.0) as u32;
-    let mut pixmap = Pixmap::new(pixels(size.width()), pixels(size.height()))
+    let pixels = |length: f32| (length * scale).ceil().max(1.0) as usize;
+    let (width, height) = (pixels(size.width()), pixels(size.height()));
+    let mut pixmap = u32::try_from(width * SUPERSAMPLING)
+        .ok()
+        .zip(u32::try_from(height * SUPERSAMPLING).ok())
+        .and_then(|(width, height)| Pixmap::new(width, height))
         .ok_or("the SVG has no area to render")?;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "SUPERSAMPLING is a small integer"
+    )]
+    let scale = scale * SUPERSAMPLING as f32;
     resvg::render(
         &tree,
         Transform::from_scale(scale, scale),
         &mut pixmap.as_mut(),
     );
-    Ok(pixmap)
+    let mut sums = vec![0; width * height * 4];
+    for (i, pixel) in pixmap.data().as_chunks::<4>().0.iter().enumerate() {
+        let (x, y) = (i % (width * SUPERSAMPLING), i / (width * SUPERSAMPLING));
+        let block = (y / SUPERSAMPLING * width + x / SUPERSAMPLING) * 4;
+        for (sum, &channel) in sums[block..block + 4].iter_mut().zip(pixel) {
+            *sum += u16::from(channel);
+        }
+    }
+    Ok(Render {
+        width,
+        height,
+        sums,
+    })
 }
 
 /// Whether two renders are the same size and no channel of any pixel differs by more than
 /// [`TOLERANCE`].
-fn renders_alike(a: &Pixmap, b: &Pixmap) -> bool {
-    (a.width(), a.height()) == (b.width(), b.height())
-        && a.data()
+fn renders_alike(a: &Render, b: &Render) -> bool {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "SUPERSAMPLING is a small integer"
+    )]
+    let tolerance = u16::from(TOLERANCE) * (SUPERSAMPLING * SUPERSAMPLING) as u16;
+    (a.width, a.height) == (b.width, b.height)
+        && a.sums
             .iter()
-            .zip(b.data())
-            .all(|(a, b)| a.abs_diff(*b) <= TOLERANCE)
+            .zip(&b.sums)
+            .all(|(a, b)| a.abs_diff(*b) <= tolerance)
 }
 
 /// Optimise an SVG document with numbers rounded as far as possible without changing how it
@@ -164,10 +204,9 @@ pub fn optimise(data: &[u8], path: &Path) -> Result<Vec<u8>, String> {
     Ok(data.to_vec())
 }
 
-/// How far a channel may differ after optimising, out of 255. resvg anti-aliases edges in
-/// sixteenths of a pixel's coverage, so 16 lets an edge move by less than a sixteenth of a pixel
-/// at [`RENDER_SIZE`], and nothing more. Optimising often moves edges that much even without
-/// rounding, since paths are rewritten.
+/// How far a channel may differ after optimising, out of 255. 16 lets an edge move by a sixteenth
+/// of a pixel at [`RENDER_SIZE`], and nothing more. Optimising often moves edges that much even
+/// without rounding, since paths are rewritten.
 const TOLERANCE: u8 = 16;
 
 #[cfg(test)]
@@ -218,6 +257,15 @@ mod tests {
             optimised.contains("100.123") && !optimised.contains("100.1234"),
             "{optimised}"
         );
+    }
+
+    #[test]
+    fn accepts_curves_drawn_differently() {
+        // The outline of an ∞ whose cubic curves are exact quadratics. The optimiser writes them as
+        // quadratics, which resvg draws as slightly different lines.
+        let original = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 106 51"><path d="M25.5625 50.125C20.6875 50.125 16.3125 49.0208 12.4375 46.8125C8.60417 44.6042 5.5625 41.625 3.3125 37.875C1.10417 34.0833 0 29.8333 0 25.125V25C0 20.2917 1.10417 16.0625 3.3125 12.3125C5.5625 8.52083 8.60417 5.52083 12.4375 3.3125C16.3125 1.10417 20.6875 0 25.5625 0C30.4375 0 34.9167 1.22917 39 3.6875C43.0833 6.14583 47.5 10.3542 52.25 16.3125L53 17.25L53.75 16.3125C58.5 10.3542 62.9167 6.14583 67 3.6875C71.0833 1.22917 75.5625 0 80.4375 0C85.3125 0 89.6667 1.10417 93.5 3.3125C97.375 5.52083 100.417 8.52083 102.625 12.3125C104.875 16.0625 106 20.2917 106 25V25.125C106 29.8333 104.875 34.0833 102.625 37.875C100.417 41.625 97.375 44.6042 93.5 46.8125C89.6667 49.0208 85.3125 50.125 80.4375 50.125C75.5625 50.125 71.0833 48.8958 67 46.4375C62.9167 43.9375 58.5 39.7292 53.75 33.8125L53 32.875L52.25 33.8125C47.5 39.7292 43.0833 43.9375 39 46.4375C34.9167 48.8958 30.4375 50.125 25.5625 50.125Z"/></svg>"#;
+        let optimised = optimise(original, Path::new("test.svg")).unwrap();
+        assert!(optimised.len() < original.len());
     }
 
     #[test]
