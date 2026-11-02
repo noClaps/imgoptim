@@ -7,12 +7,13 @@ use std::{
 };
 
 use mozjpeg_sys::{
-    J_BOOLEAN_PARAM, boolean, jpeg_c_set_bool_param, jpeg_common_struct, jpeg_compress_struct,
-    jpeg_copy_critical_parameters, jpeg_create_compress, jpeg_create_decompress,
-    jpeg_decompress_struct, jpeg_destination_mgr, jpeg_destroy_compress, jpeg_destroy_decompress,
-    jpeg_error_mgr, jpeg_finish_compress, jpeg_finish_decompress, jpeg_mem_src,
-    jpeg_read_coefficients, jpeg_read_header, jpeg_save_markers, jpeg_simple_progression,
-    jpeg_std_error, jpeg_write_coefficients, jpeg_write_marker, jvirt_barray_control,
+    J_BOOLEAN_PARAM, J_COLOR_SPACE, JCOEF, boolean, jpeg_c_set_bool_param, jpeg_common_struct,
+    jpeg_compress_struct, jpeg_copy_critical_parameters, jpeg_create_compress,
+    jpeg_create_decompress, jpeg_decompress_struct, jpeg_destination_mgr, jpeg_destroy_compress,
+    jpeg_destroy_decompress, jpeg_error_mgr, jpeg_finish_compress, jpeg_finish_decompress,
+    jpeg_mem_src, jpeg_read_coefficients, jpeg_read_header, jpeg_save_markers,
+    jpeg_simple_progression, jpeg_std_error, jpeg_write_coefficients, jpeg_write_marker,
+    jvirt_barray_control,
 };
 
 const APP1: c_int = 0xE1;
@@ -375,10 +376,105 @@ fn recompress(data: &[u8], progressive_modes: &[bool]) -> Result<Vec<u8>, String
     result
 }
 
+/// Everything that determines how a JPEG is displayed: its layout, the DCT coefficients and
+/// quantisation tables that fully determine its pixels, and the colour profile and orientation.
+#[derive(Debug, PartialEq)]
+struct Decoded {
+    width: u32,
+    height: u32,
+    colour_space: J_COLOR_SPACE,
+    components: Vec<Component>,
+    markers: Vec<(c_int, Vec<u8>)>,
+}
+
+#[derive(Debug, PartialEq)]
+struct Component {
+    horizontal_sampling: c_int,
+    vertical_sampling: c_int,
+    quantisation: Vec<u16>,
+    coefficients: Vec<JCOEF>,
+}
+
+fn decode(data: &[u8]) -> Result<Decoded, String> {
+    let mut err = error_manager();
+    // SAFETY: As in `recompress`: zeroed libjpeg structs are valid, and are boxed so the
+    // pointers libjpeg keeps to them stay valid.
+    let mut src: Box<jpeg_decompress_struct> = Box::new(unsafe { mem::zeroed() });
+    src.common.err = &raw mut *err;
+
+    let result = catch(|| {
+        // SAFETY: As in `recompress`: the struct is zeroed apart from its error manager, `data`
+        // outlives `src`'s use of it, and markers are saved before the header is read.
+        let arrays = unsafe {
+            jpeg_create_decompress(&raw mut *src);
+            jpeg_mem_src(&mut src, data.as_ptr(), data.len() as _);
+            jpeg_save_markers(&mut src, APP1, 0xFFFF);
+            jpeg_save_markers(&mut src, APP2, 0xFFFF);
+            jpeg_read_header(&mut src, 1);
+            jpeg_read_coefficients(&mut src)
+        };
+        assert!(!arrays.is_null(), "libjpeg suspended reading");
+        if err.num_warnings > 0 {
+            return Err("the JPEG is truncated or corrupt".to_owned());
+        }
+        // SAFETY: `src` has read its header with markers saved and hasn't been finished.
+        let markers = unsafe { display_markers(&src) };
+        // SAFETY: After `jpeg_read_coefficients`, `common.mem` is libjpeg's memory manager.
+        let access = unsafe { (*src.common.mem).access_virt_barray }
+            .expect("libjpeg's memory manager can access coefficient arrays");
+
+        let mut components = Vec::new();
+        for c in 0..usize::try_from(src.num_components).expect("a positive component count") {
+            // SAFETY: `comp_info` has `num_components` entries, and `arrays` has one coefficient
+            // array per component. Each array row holds `width_in_blocks` blocks (rounded up),
+            // valid until `src` is finished, and each component's quantisation table is set
+            // once its coefficients are read.
+            let component = unsafe {
+                let info = &*src.comp_info.add(c);
+                let mut coefficients = Vec::new();
+                for row in 0..info.height_in_blocks {
+                    let blocks = *access(&mut src.common, *arrays.add(c), row, 1, 0);
+                    for block in slice::from_raw_parts(blocks, info.width_in_blocks as usize) {
+                        coefficients.extend_from_slice(block);
+                    }
+                }
+                Component {
+                    horizontal_sampling: info.h_samp_factor,
+                    vertical_sampling: info.v_samp_factor,
+                    quantisation: (*info.quant_table).quantval.to_vec(),
+                    coefficients,
+                }
+            };
+            components.push(component);
+        }
+
+        let decoded = Decoded {
+            width: src.image_width,
+            height: src.image_height,
+            colour_space: src.jpeg_color_space,
+            components,
+            markers,
+        };
+        // SAFETY: `src` has read its coefficients, and nothing uses them afterwards.
+        unsafe { jpeg_finish_decompress(&mut src) };
+        Ok(decoded)
+    })
+    .and_then(|result| result);
+
+    // SAFETY: Destroying is valid in any state, and nothing uses `src` afterwards.
+    unsafe { jpeg_destroy_decompress(&mut src) };
+    result
+}
+
+/// Whether two JPEGs display identically: the same coefficients, quantisation tables, layout,
+/// colour profile and orientation.
+pub fn same_image(original: &[u8], optimised: &[u8]) -> Result<bool, String> {
+    Ok(decode(original)? == decode(optimised)?)
+}
+
 #[cfg(test)]
 mod tests {
     use mozjpeg::{ColorSpace, Compress, Marker};
-    use mozjpeg_sys::JCOEF;
 
     use super::*;
 
@@ -412,60 +508,12 @@ mod tests {
         started.finish().unwrap()
     }
 
-    /// Every component's quantisation table and DCT coefficients, which fully determine the
-    /// decoded pixels.
-    fn coefficients(data: &[u8]) -> Vec<(Vec<u16>, Vec<JCOEF>)> {
-        let mut err = error_manager();
-        // SAFETY: As in `recompress`: zeroed libjpeg structs are valid, and are boxed so the
-        // pointers libjpeg keeps to them stay valid.
-        let mut src: Box<jpeg_decompress_struct> = Box::new(unsafe { mem::zeroed() });
-        src.common.err = &raw mut *err;
-        // SAFETY: As in `recompress`: the struct is zeroed apart from its error manager, and
-        // `data` outlives `src`'s use of it. Errors unwind out of this test as panics, leaking
-        // the structs, which is safe.
-        let arrays = unsafe {
-            jpeg_create_decompress(&raw mut *src);
-            jpeg_mem_src(&mut src, data.as_ptr(), data.len() as _);
-            jpeg_read_header(&mut src, 1);
-            jpeg_read_coefficients(&mut src)
-        };
-        // SAFETY: After `jpeg_read_coefficients`, `common.mem` is libjpeg's memory manager,
-        // which always provides `access_virt_barray`.
-        let access = unsafe { (*src.common.mem).access_virt_barray }.unwrap();
-
-        let mut components = Vec::new();
-        for c in 0..usize::try_from(src.num_components).unwrap() {
-            // SAFETY: `comp_info` has `num_components` entries, and `arrays` has one coefficient
-            // array per component. Each array row holds `width_in_blocks` blocks (rounded up),
-            // valid until `src` is finished, and each component's quantisation table is set
-            // once its coefficients are read.
-            unsafe {
-                let info = &*src.comp_info.add(c);
-                let mut coefficients = Vec::new();
-                for row in 0..info.height_in_blocks {
-                    let blocks = *access(&mut src.common, *arrays.add(c), row, 1, 0);
-                    for block in slice::from_raw_parts(blocks, info.width_in_blocks as usize) {
-                        coefficients.extend_from_slice(block);
-                    }
-                }
-                components.push(((*info.quant_table).quantval.to_vec(), coefficients));
-            }
-        }
-
-        // SAFETY: `src` has read its coefficients, and nothing uses it afterwards.
-        unsafe {
-            jpeg_finish_decompress(&mut src);
-            jpeg_destroy_decompress(&mut src);
-        }
-        components
-    }
-
     #[test]
     fn lossless_and_smaller() {
         let original = encode_baseline(257, 123, &[]);
         let optimised = optimise(&original).unwrap();
         assert!(optimised.len() < original.len());
-        assert_eq!(coefficients(&original), coefficients(&optimised));
+        assert!(same_image(&original, &optimised).unwrap());
     }
 
     #[test]
@@ -492,7 +540,15 @@ mod tests {
         assert!(!contains(b"camera serial number"));
         assert!(!contains(b"xmpmeta"));
         assert!(!contains(b"a comment"));
-        assert_eq!(coefficients(&original), coefficients(&optimised));
+        assert!(same_image(&original, &optimised).unwrap());
+    }
+
+    #[test]
+    fn detects_different_images() {
+        let image = encode_baseline(64, 48, &[]);
+        assert!(!same_image(&image, &encode_baseline(64, 49, &[])).unwrap());
+        let rotated = encode_baseline(64, 48, &[(Marker::APP(1), &minimal_exif(6))]);
+        assert!(!same_image(&image, &rotated).unwrap());
     }
 
     #[test]

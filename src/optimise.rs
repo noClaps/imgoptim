@@ -76,15 +76,26 @@ struct Sizes {
 
 fn optimise(path: &Path, output: &Path, zopfli_iterations: NonZeroU64) -> Result<Sizes, String> {
     let data = read(path).map_err(|e| e.to_string())?;
-    let optimised = match detect(path, &data) {
-        Some(Format::Png) => png::optimise(&data, zopfli_iterations)?,
-        Some(Format::Jpeg) => jpeg::optimise(&data)?,
-        Some(Format::Svg) => svg::optimise(&data)?,
-        None => return Err("not a PNG, JPEG or SVG".to_owned()),
+    let format = detect(path, &data).ok_or("not a PNG, JPEG or SVG")?;
+    let optimised = match format {
+        Format::Png => png::optimise(&data, zopfli_iterations)?,
+        Format::Jpeg => jpeg::optimise(&data)?,
+        Format::Svg => svg::optimise(&data)?,
     };
 
     let before = data.len();
     let result = if optimised.len() < before {
+        // Check the result against the original before trusting it with the image.
+        let same = match format {
+            Format::Jpeg => jpeg::same_image(&data, &optimised)?,
+            Format::Png | Format::Svg => true,
+        };
+        if !same {
+            return Err(
+                "the optimised image didn't match the original, so it was left unchanged"
+                    .to_owned(),
+            );
+        }
         optimised
     } else {
         data
