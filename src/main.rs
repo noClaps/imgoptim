@@ -81,7 +81,7 @@ fn detect(path: &Path, data: &[u8]) -> Option<Format> {
         Some(Format::Png)
     } else if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
         Some(Format::Jpeg)
-    } else if matches!(Format::from_extension(path), Some(Format::Svg))
+    } else if Format::from_extension(path) == Some(Format::Svg)
         || data.trim_ascii_start().starts_with(b"<")
     {
         Some(Format::Svg)
