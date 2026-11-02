@@ -76,8 +76,8 @@ fn write_atomically(path: &Path, data: &[u8], like: &Path) -> io::Result<()> {
 enum Outcome {
     /// It was optimised, or couldn't be improved: its sizes in bytes before and after.
     Optimised { before: usize, after: usize },
-    /// An earlier run already optimised it, so it was skipped.
-    Cached,
+    /// An earlier run already optimised it, so it was skipped. Its size in bytes.
+    Cached { size: usize },
 }
 
 fn optimise(
@@ -92,7 +92,7 @@ fn optimise(
         if output != path {
             write_atomically(output, &data, path).map_err(|e| e.to_string())?;
         }
-        return Ok(Outcome::Cached);
+        return Ok(Outcome::Cached { size: data.len() });
     }
 
     let optimised = match format {
@@ -132,32 +132,120 @@ fn optimise(
 
 /// Print how optimising an image went: its sizes to stdout, or its error to stderr. Returns
 /// whether it succeeded.
-fn report(path: &Path, result: Result<Outcome, String>) -> bool {
+/// Totals across all the images, for the summary.
+#[derive(Clone, Copy, Default)]
+struct Tally {
+    optimised: usize,
+    unchanged: usize,
+    cached: usize,
+    failed: usize,
+    before: u64,
+    after: u64,
+}
+
+impl Tally {
+    fn add(self, other: Self) -> Self {
+        Self {
+            optimised: self.optimised + other.optimised,
+            unchanged: self.unchanged + other.unchanged,
+            cached: self.cached + other.cached,
+            failed: self.failed + other.failed,
+            before: self.before + other.before,
+            after: self.after + other.after,
+        }
+    }
+}
+
+/// The percentage `after` is smaller or larger than `before`.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "f64 holds file sizes exactly up to 8 PiB, and only two decimals are shown"
+)]
+fn change(before: u64, after: u64) -> f64 {
+    if before == 0 {
+        0.0
+    } else {
+        (after as f64 - before as f64) / before as f64 * 100.0
+    }
+}
+
+/// A size in bytes, kilobytes or megabytes, whichever reads best.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "f64 holds file sizes exactly up to 8 PiB, and only one decimal is shown"
+)]
+fn readable_size(bytes: u64) -> String {
+    match bytes {
+        0..1_000 => format!("{bytes} bytes"),
+        1_000..1_000_000 => format!("{:.1} kB", bytes as f64 / 1e3),
+        _ => format!("{:.1} MB", bytes as f64 / 1e6),
+    }
+}
+
+/// Print how optimising an image went: its sizes to stdout, or its error to stderr. Returns its
+/// contribution to the totals.
+fn report(path: &Path, result: Result<Outcome, String>) -> Tally {
+    // Ignore failures to print, e.g. when piped into `head`, so the remaining images still get
+    // optimised.
     match result {
-        Ok(Outcome::Cached) => {
+        Ok(Outcome::Cached { size }) => {
             let _ = writeln!(io::stdout(), "{}: already optimised", path.display());
-            true
+            let size = size as u64;
+            Tally {
+                cached: 1,
+                before: size,
+                after: size,
+                ..Tally::default()
+            }
         }
         Ok(Outcome::Optimised { before, after }) => {
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "f64 holds file sizes exactly up to 8 PiB, and only two decimals are shown"
-            )]
-            let change = (after as f64 - before as f64) / before as f64 * 100.0;
-            // Ignore failures, e.g. when piped into `head`, so the remaining images still get
-            // optimised.
+            let (before, after) = (before as u64, after as u64);
             let _ = writeln!(
                 io::stdout(),
-                "{}: {before} → {after} bytes ({change:.2}%)",
+                "{}: {before} → {after} bytes ({:.2}%)",
                 path.display(),
+                change(before, after),
             );
-            true
+            Tally {
+                optimised: usize::from(after < before),
+                unchanged: usize::from(after >= before),
+                before,
+                after,
+                ..Tally::default()
+            }
         }
         Err(e) => {
             eprintln!("{}: {e}", path.display());
-            false
+            Tally {
+                failed: 1,
+                ..Tally::default()
+            }
         }
     }
+}
+
+/// One line totalling the run, e.g. "12 images: 9 optimised, 2 already optimal, 1 failed. Saved
+/// 1.4 MB of 3.2 MB (-43.75%)."
+fn summary(tally: Tally) -> String {
+    let images = tally.optimised + tally.unchanged + tally.cached + tally.failed;
+    let mut counts = vec![format!("{} optimised", tally.optimised)];
+    if tally.unchanged > 0 {
+        counts.push(format!("{} already optimal", tally.unchanged));
+    }
+    if tally.cached > 0 {
+        counts.push(format!("{} skipped as already optimised", tally.cached));
+    }
+    if tally.failed > 0 {
+        counts.push(format!("{} failed", tally.failed));
+    }
+    format!(
+        "{images} image{}: {}. Saved {} of {} ({:.2}%).",
+        if images == 1 { "" } else { "s" },
+        counts.join(", "),
+        readable_size(tally.before.saturating_sub(tally.after)),
+        readable_size(tally.before),
+        change(tally.before, tally.after),
+    )
 }
 
 pub fn run(args: &Args) -> ExitCode {
@@ -219,16 +307,18 @@ pub fn run(args: &Args) -> ExitCode {
 
     // Optimise the images in parallel, sharing oxipng's thread pool, reporting each as soon as
     // it's done. Each report is one locked write, so lines don't interleave.
-    let failures = images
+    let tally = images
         .par_iter()
         .map(|(path, output)| {
             let result = optimise(path, output, args.zopfli_iterations, cache.as_ref());
             report(path, result)
         })
-        .filter(|&succeeded| !succeeded)
-        .count();
-    if failures > 0 {
+        .reduce(Tally::default, Tally::add);
+    if tally.failed > 0 {
         status = ExitCode::FAILURE;
+    }
+    if !images.is_empty() {
+        let _ = writeln!(io::stdout(), "{}", summary(tally));
     }
     if let Some(cache) = &cache
         && let Err(e) = cache.save()
@@ -286,6 +376,32 @@ mod tests {
         assert_eq!(
             metadata(&output).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+    }
+
+    #[test]
+    fn summarises_the_run() {
+        let tally = Tally {
+            optimised: 9,
+            unchanged: 2,
+            cached: 0,
+            failed: 1,
+            before: 3_200_000,
+            after: 1_800_000,
+        };
+        assert_eq!(
+            summary(tally),
+            "12 images: 9 optimised, 2 already optimal, 1 failed. Saved 1.4 MB of 3.2 MB (-43.75%)."
+        );
+        let one = Tally {
+            cached: 1,
+            before: 500,
+            after: 500,
+            ..Tally::default()
+        };
+        assert_eq!(
+            summary(one),
+            "1 image: 0 optimised, 1 skipped as already optimised. Saved 0 bytes of 500 bytes (0.00%)."
         );
     }
 
