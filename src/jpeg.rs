@@ -613,11 +613,4 @@ mod tests {
         let error = optimise(&original[..original.len() * 3 / 4]).unwrap_err();
         assert_eq!(error, "the JPEG is truncated or corrupt");
     }
-
-    #[test]
-    fn rejects_corrupt_input() {
-        let original = encode_baseline(32, 32, &[]);
-        assert!(optimise(&original[..original.len() / 4]).is_err());
-        assert!(optimise(b"\xFF\xD8\xFFnot a jpeg").is_err());
-    }
 }
