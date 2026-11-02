@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 argp = "0.4.1"
 blake3 = "1.8"
-mozjpeg-sys = "2"
+mozjpeg-sys = { version = "2", default-features = false, features = ["parallel", "unwinding", "with_simd"] }
 oxipng = { version = "10.2.1", default-features = false, features = ["parallel", "zopfli"] }
 oxvg_ast = { version = "0.0.9", features = ["roxmltree"] }
 oxvg_optimiser = { version = "0.0.9", default-features = false }
@@ -21,4 +21,4 @@ unnecessary_safety_comment = "warn"
 unnecessary_safety_doc = "warn"
 
 [dev-dependencies]
-mozjpeg = "0.10"
+mozjpeg = { version = "0.10", default-features = false }
