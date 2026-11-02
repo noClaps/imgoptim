@@ -3,7 +3,6 @@
 use std::{
     collections::HashSet,
     env,
-    fmt::Write as _,
     fs::{File, OpenOptions, create_dir_all},
     io::{self, BufRead, BufReader, Write},
     num::NonZeroU64,
@@ -16,7 +15,7 @@ use crate::Format;
 /// Changed whenever optimising could give different results, so older entries stop matching.
 const CACHE_VERSION: u32 = 1;
 
-type Fingerprint = [u8; 32];
+type Fingerprint = blake3::Hash;
 
 pub struct Cache {
     path: PathBuf,
@@ -45,7 +44,7 @@ impl Cache {
             Ok(file) => BufReader::new(file)
                 .lines()
                 .map_while(Result::ok)
-                .filter_map(|line| parse(&line))
+                .filter_map(|line| Fingerprint::from_hex(line.trim()).ok())
                 .collect(),
             Err(e) if e.kind() == io::ErrorKind::NotFound => HashSet::new(),
             Err(e) => return Err(e),
@@ -74,7 +73,7 @@ impl Cache {
             .as_bytes(),
         );
         hasher.update(data);
-        *hasher.finalize().as_bytes()
+        hasher.finalize()
     }
 
     /// Whether this image is one imgoptim produced or couldn't improve on, with these settings.
@@ -108,7 +107,7 @@ impl Cache {
         }
         let mut lines = String::with_capacity(added.len() * 65);
         for fingerprint in added.iter() {
-            lines += &hex(fingerprint);
+            lines += &fingerprint.to_hex();
             lines.push('\n');
         }
         OpenOptions::new()
@@ -119,40 +118,9 @@ impl Cache {
     }
 }
 
-fn hex(fingerprint: &Fingerprint) -> String {
-    fingerprint
-        .iter()
-        .fold(String::with_capacity(64), |mut hex, byte| {
-            let _ = write!(hex, "{byte:02x}");
-            hex
-        })
-}
-
-fn parse(line: &str) -> Option<Fingerprint> {
-    let line = line.trim();
-    if line.len() != 64 {
-        return None;
-    }
-    let mut fingerprint = [0; 32];
-    for (byte, pair) in fingerprint
-        .iter_mut()
-        .zip(line.as_bytes().as_chunks::<2>().0)
-    {
-        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
-    }
-    Some(fingerprint)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hex_round_trips() {
-        let fingerprint: Fingerprint = std::array::from_fn(|i| u8::try_from(i * 7).unwrap());
-        assert_eq!(parse(&hex(&fingerprint)), Some(fingerprint));
-        assert_eq!(parse("not a fingerprint"), None);
-    }
 
     #[test]
     fn fingerprints_depend_on_settings_and_format() {
