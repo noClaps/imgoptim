@@ -13,7 +13,7 @@ use std::{
 use crate::Format;
 
 /// Changed whenever optimising could give different results, so older entries stop matching.
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 
 type Fingerprint = blake3::Hash;
 
