@@ -92,7 +92,8 @@ fn optimise(path: &Path, output: &Path, zopfli_iterations: NonZeroU64) -> Result
         // Check the result against the original before trusting it with the image.
         let same = match format {
             Format::Jpeg => jpeg::same_image(&data, &optimised)?,
-            Format::Png | Format::Svg => true,
+            Format::Png => png::same_image(&data, &optimised)?,
+            Format::Svg => true,
         };
         if !same {
             return Err(
