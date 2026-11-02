@@ -2,9 +2,10 @@
 
 use std::{
     env, fs,
+    io::{BufRead, BufReader},
     ops::Deref,
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 
 use mozjpeg::{ColorSpace, Compress};
@@ -228,6 +229,50 @@ fn skips_images_already_optimised() {
         stdout(&uncached).contains("3 already optimal"),
         "{}",
         stdout(&uncached)
+    );
+}
+
+#[test]
+fn caches_images_before_the_run_ends() {
+    let folder = folder("interrupted");
+    images(&folder);
+    // Noise, which Zopfli takes minutes over at this many iterations.
+    let mut state = 1u32;
+    let pixels: Vec<u8> = (0..256 * 256 * 3)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            state.to_be_bytes()[0]
+        })
+        .collect();
+    let mut slow = Vec::new();
+    let mut encoder = png::Encoder::new(&mut slow, 256, 256);
+    encoder.set_color(png::ColorType::Rgb);
+    let mut writer = encoder.write_header().unwrap();
+    writer.write_image_data(&pixels).unwrap();
+    writer.finish().unwrap();
+    fs::write(folder.join("slow.png"), slow).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_imgoptim"))
+        .args(["slow.png", "images/sub/c.svg", "-i", "1000"])
+        .current_dir(&*folder)
+        .env("XDG_CACHE_HOME", folder.join("cache"))
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    for line in lines {
+        if line.unwrap().starts_with("images/sub/c.svg: ") {
+            break;
+        }
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+
+    let second = run(&folder, &["images/sub/c.svg"]);
+    assert!(
+        stdout(&second).contains("c.svg: already optimised"),
+        "{}",
+        stdout(&second)
     );
 }
 

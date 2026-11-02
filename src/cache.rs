@@ -7,7 +7,6 @@ use std::{
     io::{self, BufRead, BufReader, Write},
     num::NonZeroU64,
     path::PathBuf,
-    sync::Mutex,
 };
 
 use crate::Format;
@@ -21,7 +20,6 @@ pub struct Cache {
     path: PathBuf,
     zopfli_iterations: NonZeroU64,
     known: HashSet<Fingerprint>,
-    added: Mutex<Vec<Fingerprint>>,
 }
 
 /// `$XDG_CACHE_HOME/imgoptim`, or `~/.cache/imgoptim`.
@@ -53,7 +51,6 @@ impl Cache {
             path,
             zopfli_iterations,
             known,
-            added: Mutex::new(Vec::new()),
         })
     }
 
@@ -81,40 +78,22 @@ impl Cache {
         self.known.contains(&self.fingerprint(format, data))
     }
 
-    /// Record an image as fully optimised.
-    pub fn insert(&self, format: Format, data: &[u8]) {
-        let fingerprint = self.fingerprint(format, data);
-        if !self.known.contains(&fingerprint) {
-            self.added
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(fingerprint);
-        }
-    }
-
-    /// Append the new fingerprints to the cache file in one write, so runs at the same time
+    /// Record an image as fully optimised, appending it to the cache file straight away so an
+    /// interrupted run keeps what it finished. Each line is one append, so runs at the same time
     /// don't interleave lines.
-    pub fn save(&self) -> io::Result<()> {
-        let added = self
-            .added
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if added.is_empty() {
+    pub fn insert(&self, format: Format, data: &[u8]) -> io::Result<()> {
+        let fingerprint = self.fingerprint(format, data);
+        if self.known.contains(&fingerprint) {
             return Ok(());
         }
         if let Some(parent) = self.path.parent() {
             create_dir_all(parent)?;
         }
-        let mut lines = String::with_capacity(added.len() * 65);
-        for fingerprint in added.iter() {
-            lines += &fingerprint.to_hex();
-            lines.push('\n');
-        }
         OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)?
-            .write_all(lines.as_bytes())
+            .write_all(format!("{}\n", fingerprint.to_hex()).as_bytes())
     }
 }
 
@@ -128,7 +107,6 @@ mod tests {
             path: PathBuf::new(),
             zopfli_iterations: NonZeroU64::new(iterations).unwrap(),
             known: HashSet::new(),
-            added: Mutex::new(Vec::new()),
         };
         let data = b"image";
         assert_ne!(

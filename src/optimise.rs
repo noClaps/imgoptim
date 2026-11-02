@@ -126,8 +126,10 @@ fn optimise(
     if after < before || output != path {
         write_atomically(output, &result, path).map_err(|e| e.to_string())?;
     }
-    if let Some(cache) = cache {
-        cache.insert(format, &result);
+    if let Some(cache) = cache
+        && let Err(e) = cache.insert(format, &result)
+    {
+        eprintln!("Couldn't update the cache: {e}");
     }
     Ok(Outcome::Optimised { before, after })
 }
@@ -320,11 +322,6 @@ pub fn run(args: &Args) -> ExitCode {
     }
     if !images.is_empty() {
         let _ = writeln!(io::stdout(), "{}", summary(tally, args.dry_run));
-    }
-    if let Some(cache) = &cache
-        && let Err(e) = cache.save()
-    {
-        eprintln!("Couldn't update the cache: {e}");
     }
     status
 }
